@@ -64,7 +64,7 @@
 
 > "Three decisions I'm particularly proud of.
 >
-> First: failure modes before the happy path. I defined seven priority rules upfront — what the agent does when Jira is down, when a message is vague, when the same bug is reported twice, when OpenAI is unavailable. For example: if a message is vague, don't wait for clarification — create the ticket with what you have, then post an INVEST prompt in Slack asking for the missing details. These rules were written before any code. They're the contract between the agent and the team.
+> First: failure modes before the happy path. I defined priority rules upfront — now eleven of them — for what the agent does when Jira is down, when a duplicate is detected, when the same bug is reported twice, when OpenAI is unavailable. For example: if a duplicate is detected, don't silently skip it — post the existing ticket link in Slack and let the human confirm whether it's the same issue. These rules were written before any code, and I've gone back and corrected two of them since (Rules 2 and 3) where the original wording didn't match what I actually built — I'd rather the docs say what's true than what sounded good on day one. They're the contract between the agent and the team.
 >
 > Second: grouping stayed in Python. I could have let the LLM group messages semantically. But grouping is a structural problem — which messages are temporally related — not a reasoning problem. Python does it free, deterministically, and testably. The LLM's job is reasoning about meaning, not sorting data by timestamp.
 >
@@ -190,7 +190,7 @@ The system prompt never changes between iterations. The conversation history gro
 
 **"How did you handle failure cases?"**
 
-> "Seven priority rules, written before any code. For example: if Jira is down, post to Slack immediately — never fail silently. If a message is vague, create the ticket with what's available and post an INVEST prompt asking for the missing details — never block on missing information. If the same bug is reported twice, surface the match to the human and let them decide — never auto-skip. These rules are the contract between the agent and the team."
+> "Eleven priority rules, written before any code. For example: if Jira is down, post to Slack immediately — never fail silently. If a message is too vague to act on, ask for clarification rather than guessing — I'd rather block briefly than file a low-quality ticket. If the same bug is reported twice, surface the match to the human and let them decide — never auto-skip. These rules are the contract between the agent and the team."
 
 ---
 
@@ -338,19 +338,23 @@ run_triage.py
 
 ---
 
-## REFERENCE — The 7 Priority Rules
+## REFERENCE — The 11 Priority Rules
 
-Memorise these. They show you thought beyond the happy path.
+Memorise these. They show you thought beyond the happy path. (Rules 2 and 3 were corrected on 2026-08-03 — the original wording described behavior that was never actually built; see `CLAUDE.md` for the full note.)
 
 | Rule | Situation | Agent behaviour |
 |---|---|---|
 | 1 | Jira is down | Post to Slack — never fail silently |
-| 2 | Message is vague | Create ticket with what's available + post INVEST prompt |
-| 3 | Confidence 65–90% | Create ticket + flag "not fully confident — please review" |
+| 2 | Message is vague | Call `ask_for_clarification` — no ticket created; ask rather than guess |
+| 3 | Confidence 0.65–0.90 | Create ticket + `needs-review` label + confidence note (code-enforced routing, Phase 10) |
 | 4 | Duplicate detected | Post match in Slack — human decides, never auto-skip |
 | 5 | Slack MCP fails mid-run | Continue processing remaining blocks, post consolidated error at end |
 | 6 | OpenAI is down | Post exact error + instruct team to triage manually |
 | 7 | Same bug reported twice | Apply Rule 4 for second report — first ticket stands |
+| 8 | Quality metrics cold start | No quality alert fires until `MIN_REACTIONS_FOR_QUALITY` reactions collected |
+| 9 | Missing Slack `message_ts` | Silently skip reaction tracking for that post — not an error |
+| 10 | Semantic extraction LLM call fails | Fall back to count-based patterns, agent keeps working |
+| 11 | Episode retrieval returns no matches | Continue with no episodic injection — expected cold-start state |
 
 ---
 

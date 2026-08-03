@@ -272,10 +272,10 @@ These are project-wide decisions made once. Every workflow, every feature, and e
 Transparency wins. Post in Slack so the team member knows the ticket was not created. Never fail silently.
 
 **Rule 2 — Message is vague**
-Create immediately, then prompt. Create a ticket with what's available, then post a structured INVEST prompt in Slack asking the team member to fill in the missing details. Never block on missing information.
+Ask, don't guess. Call `ask_for_clarification` and post a question in Slack asking for the missing details — no ticket is created for an Unclear message. This blocks on missing information by design: the agent would rather ask than file a low-quality ticket. (Note: this rule's wording previously said "create immediately, then prompt" — that was aspirational and never matched what `ask_for_clarification` actually does; corrected 2026-08-03 to describe the real behavior.)
 
-**Rule 3 — Classification confidence is low (65–90%)**
-Create with flag. Create the ticket with the best-guess type and priority, then post the INVEST prompt in Slack plus a confidence flag: *"I created this as a [type] but I'm not fully confident — please review the type and priority."*
+**Rule 3 — Classification confidence is 0.65–0.90 (Phase 10)**
+Create with flag. `route_confidence()` routes this band to `create_jira_ticket` with a `needs-review` label added and a confidence note appended to the tool's result (e.g. "flagged for review — confidence 0.78"), which the LLM then reports back to Slack via `post_slack_message`. Below 0.65, no ticket is created at all — see the confidence-based routing section in `docs/plans/2026-08-03-confidence-routing-design.md` for the full three-tier behavior. (Note: this rule's wording previously described a specific structured "INVEST prompt" message that was never implemented; corrected 2026-08-03 to describe the real behavior.)
 
 **Rule 4 — Duplicate detected**
 Human confirms. Post in Slack with the match found, the existing ticket link, and let the team member decide whether it's the same issue or a new one. Never silently skip.

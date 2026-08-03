@@ -101,13 +101,13 @@ GPT-4o receives the Slack conversation and chooses between four actions: create 
 
 **What I was solving:** The agent runs unsupervised. If it fails, who finds out? When?
 
-**What shipped — the 7 Priority Rules:**
+**What shipped — the Priority Rules (11 total as of Phase 10; corrected 2026-08-03 — see `CLAUDE.md` for the note on Rules 2/3):**
 
 | Rule | Scenario | Agent behaviour |
 |------|----------|----------------|
 | Rule 1 | Jira unavailable | Post to Slack: "Could not create ticket — please create manually" |
-| Rule 2 | Message is vague | Create with available info, then post INVEST prompt asking for details |
-| Rule 3 | Confidence is 65–90% | Create with best-guess type + flag: "I'm not fully confident — please review" |
+| Rule 2 | Message is vague | Call `ask_for_clarification` — no ticket created; ask rather than guess |
+| Rule 3 | Confidence is 0.65–0.90 | Create with `needs-review` label + confidence note (code-enforced, Phase 10) |
 | Rule 4 | Duplicate detected | Post existing ticket link + ask human to confirm it's the same issue |
 | Rule 5 | Slack MCP fails mid-run | Continue all remaining blocks; post consolidated error summary at end |
 | Rule 6 | OpenAI API unavailable | Alert Slack with specific error + "please triage manually"; exit cleanly |

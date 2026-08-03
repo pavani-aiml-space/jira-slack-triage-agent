@@ -157,17 +157,18 @@ If a `MemoryContext` was passed in:
 
 ### 3f. For each block: GPT-4o tool-calling loop
 
-`_run_llm_loop()` sends the block text (plus any memory context) to GPT-4o with three tools available:
+`_run_llm_loop()` sends the block text (plus any memory context) to the LLM provider (Claude by default since Phase 9; see `agents/llm/factory.py`) with four tools available:
 
-| Tool | When GPT-4o calls it | What it does |
+| Tool | When the LLM calls it | What it does |
 |------|---------------------|--------------|
-| `create_jira_ticket` | Message is clear enough to act on (confidence ≥ `CONFIDENCE_AUTO_ACT`) | Calls Jira MCP to create a ticket; posts confirmation to Slack with ticket link |
-| `post_slack_message` | Needs to notify the team about something (duplicate, quality flag, etc.) | Posts a message to the channel via Slack MCP |
-| `ask_for_clarification` | Message is too vague to act on (confidence < `CONFIDENCE_ASK_HUMAN`) | Posts a structured INVEST prompt to Slack asking the reporter to provide more detail |
+| `create_jira_ticket` | Classified as Bug, Story, or Task | Requires a self-assessed `confidence`; `route_confidence()` then decides in code (Phase 10) — `>= CONFIDENCE_AUTO_ACT` files directly, `>= CONFIDENCE_ASK_HUMAN` files with a `needs-review` flag, below that files nothing yet and escalates to Slack for human confirmation instead |
+| `post_slack_message` | Needs to notify the team about something (duplicate, ticket confirmation, quality flag, etc.) | Posts a message to the channel via Slack MCP |
+| `ask_for_clarification` | Classified as Unclear — not enough information to act on | Posts a question to Slack asking for missing details. No ticket is created for this path (see Priority Rule 2 in `CLAUDE.md`) |
+| `search_memory` | Uncertain about type, priority, or whether something similar was triaged before | Retrieves similar past episodes by embedding similarity, on demand (lazy retrieval — not pre-injected per block) |
 
-The loop continues until GPT-4o returns a response with no tool calls, or `MAX_AGENT_ITERATIONS` is reached.
+The loop continues until the LLM returns a response with no tool calls, or `MAX_AGENT_ITERATIONS` is reached.
 
-**Why tool-calling instead of a classifier:** A pure classifier can only output a label. Tool-calling lets GPT-4o both classify and act in the same step. It also allows the model to call multiple tools in one pass (e.g. create a ticket *and* post a quality flag) without an extra round-trip.
+**Why tool-calling instead of a classifier:** A pure classifier can only output a label. Tool-calling lets the LLM both classify and act in the same step. It also allows the model to call multiple tools in one pass (e.g. create a ticket *and* post a quality flag) without an extra round-trip.
 
 ### 3g. Capture confirmation timestamps
 
