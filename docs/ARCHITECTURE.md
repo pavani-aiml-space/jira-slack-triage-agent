@@ -18,19 +18,21 @@ JiraSlack replaces that human step with an AI agent that runs on demand, reads t
 
 ```mermaid
 flowchart TD
-    Start(["run_triage.py"]) --> Mem["Load episodic + semantic memory"]
+    Start(["run_triage.py"]) --> Resolve["Resolve pending confirmations\nfrom previous runs"]
+    Resolve --> Mem["Load episodic + semantic memory"]
     Mem --> Fetch["Fetch new Slack messages\nvia Slack MCP"]
     Fetch --> Group["Group into 5-min\nconversation blocks"]
     Group --> Dup{{"Duplicate?\nembedding similarity >= 0.85"}}
     Dup -- yes --> PostDup["Post existing ticket link\nvia Slack MCP"]
-    Dup -- no --> Agent["LLM triage agent\nclassify type / priority / confidence\n+ memory context"]
-    Agent --> Conf{{"Confidence"}}
+    Dup -- no --> Agent["LLM triage agent\nclassify type / priority + self-assessed confidence\n+ memory context"]
+    Agent --> Conf{{"route_confidence()"}}
     Conf -- ">= 0.90 auto-act" --> Create["create_jira_ticket\nvia Jira MCP"]
-    Conf -- "0.65-0.90 flag" --> Create
-    Conf -- "less than 0.65 ask human" --> Ask["ask_for_clarification\nvia Slack MCP"]
+    Conf -- "0.65-0.90 flag" --> CreateFlag["create_jira_ticket\n+ needs-review label"]
+    Conf -- "< 0.65 escalate" --> Propose["Propose ticket to Slack,\npersist as pending confirmation"]
     Create --> Confirm["Post confirmation to Slack"]
-    Ask --> Confirm
+    CreateFlag --> Confirm
     PostDup --> Confirm
+    Propose -. "affirmed or corrected\non a later run" .-> Resolve
     Confirm --> React["Collect reactions next run\n(quality signal)"]
     Confirm --> Judge["LLM-as-judge scoring\n(optional, vs golden dataset)"]
     React --> Persist["Write episode +\nextract semantic patterns"]
@@ -38,6 +40,8 @@ flowchart TD
     Persist --> Watermark["Save watermark"]
     Watermark -. next scheduled run .-> Start
 ```
+
+**Confidence routing (Phase 10):** the LLM always self-assesses a `confidence` score when proposing a ticket; a pure `route_confidence()` function — not the LLM's own judgment — decides the tier. Escalated proposals don't file a ticket on the spot: they're posted to Slack and persisted, then resolved on a later run's `Resolve` step — an affirmative reply files as proposed, a correction triggers one re-classification call, and no reply past `PENDING_CONFIRMATION_MAX_AGE_HOURS` auto-files as a safety net. See [`docs/plans/2026-08-03-confidence-routing-design.md`](plans/2026-08-03-confidence-routing-design.md).
 
 ## The Pipeline at 30,000 Feet
 

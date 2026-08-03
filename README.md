@@ -33,18 +33,20 @@ The value is minimizing that no-value-add manual task of filing — while still 
 ```mermaid
 flowchart LR
     A["Slack message posted"] --> B["Fetch + group\n(5-min window)"]
-    B --> C{"Duplicate?\nembedding similarity ≥ 0.85"}
+    B --> C{"Duplicate?\nembedding similarity >= 0.85"}
     C -- "yes" --> H["Post existing ticket link\nhuman confirms"]
-    C -- "no" --> D["GPT-4o classifies\n+ memory context"]
-    D -- "confidence ≥ 0.90" --> E["create_jira_ticket"]
-    D -- "confidence < 0.65" --> F["create + ask_for_clarification"]
-    D -- "0.65 – 0.90" --> G["create + flag low confidence"]
+    C -- "no" --> D["LLM classifies\n+ self-assessed confidence"]
+    D -- ">= 0.90 auto-act" --> E["create_jira_ticket"]
+    D -- "0.65-0.90 flag" --> G["create_jira_ticket\n+ needs-review label"]
+    D -- "< 0.65 escalate" --> F["propose to Slack,\nawait human reply"]
     E --> I["Jira ticket created"]
-    F --> I
     G --> I
+    F -. "confirmed / corrected\non a later run" .-> I
     I --> J["Confirmation posted to Slack"]
     H --> J
 ```
+
+Confidence is code-enforced, not left to the LLM's own judgment: `create_jira_ticket` always requires a `confidence` field, and a pure `route_confidence()` function decides the tier. Below the escalate threshold, no ticket is filed yet — the proposal is persisted and resolved on a later run once a human replies (affirmative → filed as proposed; a correction → one re-classification call, then filed). See [`docs/plans/2026-08-03-confidence-routing-design.md`](docs/plans/2026-08-03-confidence-routing-design.md) for the full design.
 
 This covers the per-message routing logic. For the full system — memory load/persist, the eval and quality-feedback loop, and how everything connects across runs — see the [end-to-end flow diagram](docs/ARCHITECTURE.md#end-to-end-flow) in the architecture doc.
 
@@ -79,6 +81,7 @@ Then posts back: *"Created SCRUM-3 → https://yoursite.atlassian.net/browse/SCR
 | Duplicate detection via embedding similarity gate | ✅ |
 | Quality feedback loop — 👍/👎 Slack reactions → rolling quality metrics → alerting | ✅ |
 | Eval framework — golden dataset (labeled fixtures) + LLM-as-judge scoring on type/priority/title/description fit | ✅ |
+| Code-enforced confidence routing — auto-act / flag / escalate-to-human-confirmation, with cross-run pending-confirmation resolution | ✅ |
 | Episodic + semantic memory — the agent gets smarter across runs, not just within one | ✅ |
 | Model-agnostic LLM provider — Claude by default; swap to OpenAI via `LLM_PROVIDER` | ✅ |
 | Scheduled / continuous execution, event-driven Slack trigger | ⬜ planned |

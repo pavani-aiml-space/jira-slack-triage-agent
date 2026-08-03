@@ -81,6 +81,10 @@ class Settings:
     SEMANTIC_LLM_MIN_PATTERNS:     int = int(os.getenv("SEMANTIC_LLM_MIN_PATTERNS",      "3"))
     MAX_SEMANTIC_PATTERN_CHARS:    int = int(os.getenv("MAX_SEMANTIC_PATTERN_CHARS",     "1000"))
 
+    # ── Phase 10 — Confidence-Based Routing ───────────────────────────────────
+    PENDING_CONFIRMATION_STORE_PATH:    str = os.getenv("PENDING_CONFIRMATION_STORE_PATH", "memory/pending_confirmations.json")
+    PENDING_CONFIRMATION_MAX_AGE_HOURS: int = int(os.getenv("PENDING_CONFIRMATION_MAX_AGE_HOURS", "72"))
+
     @classmethod
     def validate(cls, required: list[str] | None = None) -> None:
         """Raise ValueError listing any missing required variables."""

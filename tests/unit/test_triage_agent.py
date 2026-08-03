@@ -88,7 +88,8 @@ async def test_execute_tool_dispatches_create_jira_ticket():
         })
     assert result == "Created SCRUM-1: Test bug"
     mock_fn.assert_called_once_with(
-        summary="Test bug", issue_type="Bug", priority="High", description="desc"
+        summary="Test bug", issue_type="Bug", priority="High", description="desc",
+        block_context=None,
     )
 
 
@@ -263,6 +264,48 @@ async def test_run_llm_loop_action_ticket_created():
     assert result.ticket_summary == "Login crash"
     assert result.ticket_type == "Bug"
     assert result.ticket_priority == "High"
+
+
+@pytest.mark.asyncio
+async def test_run_llm_loop_action_escalated_for_confirmation():
+    """When create_jira_ticket returns [ESCALATED], action='escalated_for_confirmation', no ticket_key."""
+    mock_jira = AsyncMock(return_value="[ESCALATED] Low confidence (0.40) — posted for human confirmation.")
+    with patch("agents.triage.triage_agent._provider") as mock_provider:
+        mock_provider.chat = AsyncMock(side_effect=[
+            LLMTurn(
+                finish_reason="tool_calls", content=None,
+                tool_calls=[ToolCall(id="tc_jira", name="create_jira_ticket", args={
+                    "summary": "Vague issue", "issue_type": "Bug", "priority": "Medium",
+                    "description": "not much detail", "confidence": 0.4,
+                })],
+                prompt_tokens=300, completion_tokens=60, raw_message=MagicMock(),
+            ),
+            make_llm_turn(finish_reason="stop", prompt_tokens=310, completion_tokens=20),
+        ])
+        with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"create_jira_ticket": mock_jira}):
+            result = await _run_llm_loop("vague report", block_index=0, block_snippet="vague report")
+
+    assert result.action == "escalated_for_confirmation"
+    assert result.ticket_key is None
+    assert result.ticket_summary == "Vague issue"
+
+
+@pytest.mark.asyncio
+async def test_execute_tool_passes_block_context_to_create_jira_ticket_only():
+    """block_context is threaded through to create_jira_ticket but not other tools."""
+    mock_jira = AsyncMock(return_value="Created SCRUM-1: x")
+    mock_clarify = AsyncMock(return_value="Clarification posted")
+    ctx = {"run_id": "r1", "block_index": 0, "block_snippet": "s"}
+    with patch.dict(triage_agent_module.TOOL_EXECUTORS, {
+        "create_jira_ticket": mock_jira, "ask_for_clarification": mock_clarify,
+    }):
+        await _execute_tool("create_jira_ticket", {"summary": "s", "issue_type": "Bug",
+                                                     "priority": "High", "description": "d",
+                                                     "confidence": 0.95}, block_context=ctx)
+        await _execute_tool("ask_for_clarification", {"question": "q?"}, block_context=ctx)
+
+    assert mock_jira.call_args.kwargs["block_context"] == ctx
+    assert "block_context" not in mock_clarify.call_args.kwargs
 
 
 @pytest.mark.asyncio
@@ -975,3 +1018,39 @@ async def test_search_memory_returns_error_string_when_embed_fails():
     finally:
         mt._active_episode_store = None
     assert "Memory search unavailable" in result
+
+
+# ── run() — Phase 10: resolve pending confirmations ──────────────────────────
+
+@pytest.mark.asyncio
+async def test_run_resolves_pending_confirmations_when_items_exist():
+    from pipeline.pending_confirmation_store import PendingConfirmationStore
+
+    patches = patch_run_deps(blocks=[], llm_return=None)
+    non_empty_store = PendingConfirmationStore(items=[MagicMock()])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+        with patch("agents.triage.triage_agent.load_pending_store", return_value=non_empty_store):
+            with patch("agents.triage.triage_agent.resolve_pending_confirmations",
+                       new_callable=AsyncMock, return_value=non_empty_store) as mock_resolve:
+                with patch("agents.triage.triage_agent.save_pending_store") as mock_save:
+                    with patch("agents.triage.triage_agent.write_run_log"):
+                        await run()
+
+    mock_resolve.assert_called_once_with(non_empty_store)
+    mock_save.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_run_skips_resolution_when_no_pending_items():
+    from pipeline.pending_confirmation_store import PendingConfirmationStore
+
+    patches = patch_run_deps(blocks=[], llm_return=None)
+    empty_store = PendingConfirmationStore(items=[])
+    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+        with patch("agents.triage.triage_agent.load_pending_store", return_value=empty_store):
+            with patch("agents.triage.triage_agent.resolve_pending_confirmations",
+                       new_callable=AsyncMock) as mock_resolve:
+                with patch("agents.triage.triage_agent.write_run_log"):
+                    await run()
+
+    mock_resolve.assert_not_called()

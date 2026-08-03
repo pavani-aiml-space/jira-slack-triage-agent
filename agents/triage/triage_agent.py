@@ -52,6 +52,8 @@ from agents.triage.tools.slack_tools import (
 import agents.triage.tools.memory_tools as memory_tools
 from agents.triage.tools.memory_tools import SEARCH_MEMORY_SCHEMA, search_memory
 from pipeline.memory_runner import MemoryContext
+from pipeline.pending_confirmation_store import load_pending_store, save_pending_store
+from pipeline.confirmation_resolver import resolve_pending_confirmations
 
 _provider: LLMProvider = get_llm_provider(settings)
 
@@ -75,7 +77,10 @@ For each conversation block:
 3. If it is Bug, Story, or Task:
    - Create a Jira ticket using create_jira_ticket.
    - Include a concise title, clear description, relevant Slack context, expected vs. actual behavior if available, affected users/scope, and priority.
-   - Then call post_slack_message with the Jira ticket link and a short summary.
+   - Always include a confidence score (0.0-1.0) — how sure you are about the type, priority, and details. Be honest, not optimistic: a vague or ambiguous report should score low, not 0.9 just because you produced a plausible-looking ticket.
+   - Also include reasoning — one or two sentences on why you classified it this way. This is shown to the team if your confidence is too low to file automatically.
+   - Below a confidence threshold, the ticket will NOT be filed immediately — it will be proposed to the team for confirmation instead, and create_jira_ticket's result will start with "[ESCALATED]". When you see that prefix, do NOT call post_slack_message yourself — the confirmation request has already been posted.
+   - Otherwise, call post_slack_message with the Jira ticket link and a short summary.
 4. If it is Unclear:
    - Call ask_for_clarification.
    - Ask only for the missing details needed to create a good ticket.
@@ -126,14 +131,24 @@ TOOL_EXECUTORS = {
 
 
 # ── 5. _execute_tool() — runs whichever tool OpenAI chose ────────────────────
-async def _execute_tool(tool_name: str, tool_args: dict) -> str:
-    """Look up the tool by name and execute it with the given args."""
+async def _execute_tool(tool_name: str, tool_args: dict, block_context: dict | None = None) -> str:
+    """
+    Look up the tool by name and execute it with the given args.
+
+    block_context (run_id, block_index, block_snippet) is only threaded through
+    to create_jira_ticket — it's the only tool that needs it, to persist enough
+    context for a low-confidence escalation to be re-classified later if the
+    human replies with a correction (Phase 10).
+    """
     executor = TOOL_EXECUTORS.get(tool_name)
     if not executor:
         return f"Error: unknown tool '{tool_name}'"
 
     print(f"  → Executing: {tool_name}({tool_args})")
-    result = await executor(**tool_args)
+    if tool_name == "create_jira_ticket":
+        result = await executor(**tool_args, block_context=block_context)
+    else:
+        result = await executor(**tool_args)
     print(f"  → Result   : {result}")
     return result
 
@@ -145,6 +160,7 @@ async def _run_llm_loop(
     block_index: int,
     block_snippet: str,
     effective_system_prompt: str = "",
+    run_id: str = "",
 ) -> BlockResult:
     """
     Send one conversation block to the LLM provider and loop until it's done.
@@ -177,6 +193,8 @@ async def _run_llm_loop(
     last_finish_reason = "stop"
     iteration_count = 0
 
+    block_context = {"run_id": run_id, "block_index": block_index, "block_snippet": block_snippet}
+
     for iteration in range(settings.MAX_AGENT_ITERATIONS):
         iteration_count += 1
         turn = await _provider.chat(messages, ALL_TOOLS, system_prompt)
@@ -203,7 +221,7 @@ async def _run_llm_loop(
                 if tool_name == "create_jira_ticket":
                     jira_tool_args = tool_args
 
-                result = await _execute_tool(tool_name, tool_args)
+                result = await _execute_tool(tool_name, tool_args, block_context=block_context)
 
                 if tool_name == "create_jira_ticket":
                     jira_tool_result = result
@@ -224,6 +242,19 @@ async def _run_llm_loop(
     )
 
     if "create_jira_ticket" in tools_called_names:
+        if jira_tool_result.startswith("[ESCALATED]"):
+            # Phase 10 — low confidence: no ticket filed yet, proposal posted
+            # to Slack and persisted for a later run to resolve.
+            return BlockResult(
+                block_index=block_index,
+                block_snippet=block_snippet,
+                action="escalated_for_confirmation",
+                ticket_summary=jira_tool_args.get("summary"),
+                ticket_type=jira_tool_args.get("issue_type"),
+                ticket_priority=jira_tool_args.get("priority"),
+                ticket_description=jira_tool_args.get("description"),
+                llm=llm_stats,
+            )
         key_match = re.search(r"Created (\w+-\d+):", jira_tool_result)
         ticket_key = key_match.group(1) if key_match else None
         return BlockResult(
@@ -273,11 +304,12 @@ def _print_block_outcome(result: BlockResult, index: int, total: int) -> None:
     """Print [Block N/M] ✅ / 💬 / ⚠️ / 🔁 outcome line to stdout."""
     n = index + 1
     icons = {
-        "ticket_created":      "✅ Ticket created   :",
-        "clarification_asked": "💬 Clarification asked",
-        "error":               "⚠️  Error            :",
-        "no_action":           "—  No action",
-        "duplicate_flagged":   "🔁 Duplicate flagged :",
+        "ticket_created":            "✅ Ticket created   :",
+        "clarification_asked":       "💬 Clarification asked",
+        "error":                     "⚠️  Error            :",
+        "no_action":                 "—  No action",
+        "duplicate_flagged":         "🔁 Duplicate flagged :",
+        "escalated_for_confirmation": "🤔 Escalated for confirmation:",
     }
     label = icons.get(result.action, f"—  {result.action}")
     if result.action == "ticket_created":
@@ -285,6 +317,9 @@ def _print_block_outcome(result: BlockResult, index: int, total: int) -> None:
               f'"{result.ticket_summary}" ({result.ticket_type} · {result.ticket_priority})')
     elif result.action == "duplicate_flagged":
         print(f"[Block {n}/{total}] {label} {result.ticket_key}")
+    elif result.action == "escalated_for_confirmation":
+        print(f"[Block {n}/{total}] {label} "
+              f'"{result.ticket_summary}" ({result.ticket_type} · {result.ticket_priority})')
     elif result.action == "error":
         print(f"[Block {n}/{total}] {label} logged")
     else:
@@ -302,6 +337,7 @@ def _print_run_summary(run_log: RunLog, log_path: str) -> None:
     print(f"  Tickets created  : {run_log.tickets_created_count}{keys_str}")
     print(f"  Duplicates flagged: {run_log.duplicates_flagged_count}")
     print(f"  Clarifications   : {run_log.clarifications_asked_count}")
+    print(f"  Escalated (pending confirmation): {run_log.escalated_for_confirmation_count}")
     print(f"  Errors           : {run_log.error_count}")
     print(f"  Status           : {run_log.status}")
     print(f"  Log written      : {log_path}")
@@ -336,6 +372,7 @@ async def run(
     Main entry point for the triage agent.
 
     Steps:
+      0. Resolve any pending low-confidence confirmations from previous runs
       1. Fetch Slack messages + open Jira tickets in parallel
       2. Build embedding cache (diff-only re-embedding)
       3. Group messages into conversation blocks
@@ -382,6 +419,14 @@ async def run(
     print(f"Channel      : {settings.SLACK_CHANNEL_ID}")
     print(f"Max messages : {settings.MAX_MESSAGES_TO_FETCH}")
     print(f"Time window  : {settings.CONTEXT_WINDOW_MINUTES} min\n")
+
+    # Step 0 — resolve any low-confidence escalations left pending from a
+    # previous run, before processing new messages (Phase 10).
+    pending_store = load_pending_store(settings.PENDING_CONFIRMATION_STORE_PATH)
+    if pending_store.items:
+        print(f"Resolving {len(pending_store.items)} pending confirmation(s) from previous runs...")
+        pending_store = await resolve_pending_confirmations(pending_store)
+        save_pending_store(pending_store, settings.PENDING_CONFIRMATION_STORE_PATH)
 
     # Step 1 — parallel fetch: Slack messages + open Jira tickets
     # fetch_open_tickets catches its own errors and returns [] (Rule 5 — skip duplicate check)
@@ -448,7 +493,7 @@ async def run(
             # ── LLM loop ───────────────────────────────────────────────────
             result: BlockResult = await _run_llm_loop(
                 block["combined_text"], block_index=i, block_snippet=snippet,
-                effective_system_prompt=effective_system_prompt,
+                effective_system_prompt=effective_system_prompt, run_id=run_id,
             )
             run_log.blocks.append(result)
             if result.action == "ticket_created":
@@ -467,6 +512,8 @@ async def run(
                         print(f"[duplicate_detector] cache update embed failed (Rule 5): {emb_err}")
             elif result.action == "clarification_asked":
                 run_log.clarifications_asked_count += 1
+            elif result.action == "escalated_for_confirmation":
+                run_log.escalated_for_confirmation_count += 1
             _print_block_outcome(result, index=i, total=len(blocks))
 
         except LLMProviderError as e:

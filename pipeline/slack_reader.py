@@ -107,3 +107,55 @@ async def fetch_messages(
         ]
 
         return messages
+
+
+# ── Step D: Fetch replies to a specific thread ────────────────────────────────
+async def fetch_thread_replies(channel_id: str, thread_ts: str) -> list[dict]:
+    """
+    Connect to Slack MCP, fetch all replies in a thread, and return them as a
+    raw list — same shape as fetch_messages(), excluding the root message itself.
+
+    Used by confirmation_resolver.py to check whether a human has replied to a
+    low-confidence escalation proposal.
+
+    Args:
+        channel_id: Slack channel ID (e.g. "C123ABC")
+        thread_ts:  ts of the thread's root message (the escalation proposal)
+
+    Each returned message is a dict with:
+        text  — the message content
+        user  — Slack user ID who sent it
+        ts    — Unix timestamp string
+    """
+    async with slack_mcp_session() as session:
+
+        result = await session.call_tool(
+            "slack_get_thread_replies",
+            arguments={
+                "channel_id": channel_id,
+                "thread_ts":  thread_ts,
+            },
+        )
+
+        raw = []
+        for block in result.content:
+            if hasattr(block, "text"):
+                data = json.loads(block.text)
+                raw  = data.get("messages", [])
+                break
+
+        # conversations.replies (unlike conversations.history) returns oldest-first
+        # already — no reversal needed here.
+        replies = [
+            {
+                "user": m.get("user", "unknown"),
+                "text": m.get("text", ""),
+                "ts":   m.get("ts", "0"),
+            }
+            for m in raw
+            if m.get("text", "").strip()
+            and m.get("subtype") is None
+            and m.get("ts") != thread_ts             # exclude the proposal message itself
+        ]
+
+        return replies

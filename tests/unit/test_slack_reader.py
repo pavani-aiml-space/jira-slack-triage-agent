@@ -7,7 +7,7 @@ import json
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from pipeline.slack_reader import fetch_messages
+from pipeline.slack_reader import fetch_messages, fetch_thread_replies
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -131,3 +131,57 @@ async def test_passes_channel_id_to_mcp():
         await fetch_messages("C_SPECIFIC_CHANNEL")
     args = session.call_tool.call_args[1]["arguments"]
     assert args["channel_id"] == "C_SPECIFIC_CHANNEL"
+
+
+# ── fetch_thread_replies ──────────────────────────────────────────────────────
+
+@pytest.mark.asyncio
+async def test_thread_replies_calls_correct_tool():
+    session = make_mock_session([])
+    with patch_slack_session(session):
+        await fetch_thread_replies("C123", "1000.0")
+    assert session.call_tool.call_args[0][0] == "slack_get_thread_replies"
+
+
+@pytest.mark.asyncio
+async def test_thread_replies_passes_channel_and_thread_ts():
+    session = make_mock_session([])
+    with patch_slack_session(session):
+        await fetch_thread_replies("C123", "1000.0")
+    args = session.call_tool.call_args[1]["arguments"]
+    assert args["channel_id"] == "C123"
+    assert args["thread_ts"] == "1000.0"
+
+
+@pytest.mark.asyncio
+async def test_thread_replies_excludes_root_message():
+    raw = [
+        {"user": "BOT", "text": "Proposed: Bug/High — confirm?", "ts": "1000.0"},
+        {"user": "U1",  "text": "yes", "ts": "1005.0"},
+    ]
+    session = make_mock_session(raw)
+    with patch_slack_session(session):
+        result = await fetch_thread_replies("C123", "1000.0")
+    assert len(result) == 1
+    assert result[0]["text"] == "yes"
+
+
+@pytest.mark.asyncio
+async def test_thread_replies_preserves_oldest_first_order_without_reversal():
+    raw = [
+        {"user": "BOT", "text": "root", "ts": "1000.0"},
+        {"user": "U1",  "text": "first reply", "ts": "1005.0"},
+        {"user": "U1",  "text": "second reply", "ts": "1010.0"},
+    ]
+    session = make_mock_session(raw)
+    with patch_slack_session(session):
+        result = await fetch_thread_replies("C123", "1000.0")
+    assert [r["text"] for r in result] == ["first reply", "second reply"]
+
+
+@pytest.mark.asyncio
+async def test_thread_replies_empty_thread_returns_empty_list():
+    session = make_mock_session([{"user": "BOT", "text": "root", "ts": "1000.0"}])
+    with patch_slack_session(session):
+        result = await fetch_thread_replies("C123", "1000.0")
+    assert result == []

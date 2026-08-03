@@ -36,7 +36,7 @@ class LlmStats:
 class BlockResult:
     block_index: int
     block_snippet: str
-    action: str  # "ticket_created" | "clarification_asked" | "error" | "skipped" | "no_action"
+    action: str  # "ticket_created" | "clarification_asked" | "error" | "skipped" | "no_action" | "duplicate_flagged" | "escalated_for_confirmation"
     ticket_key: Optional[str] = None
     ticket_summary: Optional[str] = None
     ticket_type: Optional[str] = None
@@ -68,6 +68,7 @@ class RunLog:
     blocks_skipped_count: int      # always 0 in Phase 3; Phase 4 populates
     error_count: int
     duplicates_flagged_count: int = 0
+    escalated_for_confirmation_count: int = 0  # Phase 10 — low-confidence proposals awaiting human reply
     last_message_ts: str | None = None  # ts of latest message processed; used as next run's watermark
     blocks: list[BlockResult] = field(default_factory=list)
     errors: list[ErrorEntry] = field(default_factory=list)
