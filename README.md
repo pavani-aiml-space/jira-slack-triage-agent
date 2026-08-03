@@ -1,6 +1,6 @@
 # JiraSlack — AI Triage Agent
 
-> Reads Slack. Creates Jira tickets automatically — and flags it when it's not sure.
+> Reads Slack. Creates Jira tickets automatically and flags it when it's not sure.
 
 JiraSlack watches a Slack channel for bug reports, feature requests, and tasks, classifies each one with GPT-4o, and creates a structured Jira ticket automatically. When it's confident, it acts. When it isn't, it asks. It never fails silently, and it never files the same bug twice.
 
@@ -46,9 +46,9 @@ flowchart LR
     H --> J
 ```
 
-Confidence is code-enforced, not left to the LLM's own judgment: `create_jira_ticket` always requires a `confidence` field, and a pure `route_confidence()` function decides the tier. Below the escalate threshold, no ticket is filed yet — the proposal is persisted and resolved on a later run once a human replies (affirmative → filed as proposed; a correction → one re-classification call, then filed). See [`docs/plans/2026-08-03-confidence-routing-design.md`](docs/plans/2026-08-03-confidence-routing-design.md) for the full design.
+Confidence is code enforced, not left to the LLM's own judgment: `create_jira_ticket` always requires a `confidence` field, and a pure `route_confidence()` function decides the tier. Below the escalate threshold, no ticket is filed yet, the proposal is persisted and resolved on a later run once a human replies (affirmative → filed as proposed; a correction → one re-classification call, then filed). See [`docs/plans/2026-08-03-confidence-routing-design.md`](docs/plans/2026-08-03-confidence-routing-design.md) for the full design.
 
-This covers the per-message routing logic. For the full system — memory load/persist, the eval and quality-feedback loop, and how everything connects across runs — see the [end-to-end flow diagram](docs/ARCHITECTURE.md#end-to-end-flow) in the architecture doc.
+This covers the per-message routing logic. For the full system: memory load/persist, the eval and quality-feedback loop, and how everything connects across runs - see the [end-to-end flow diagram](docs/ARCHITECTURE.md#end-to-end-flow) in the architecture doc.
 
 **Concrete example:**
 
