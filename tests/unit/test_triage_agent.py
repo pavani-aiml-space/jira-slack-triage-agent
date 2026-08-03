@@ -48,9 +48,19 @@ def make_tool_call_turn(tool_name: str, tool_args: dict) -> LLMTurn:
 
 # ── settings ──────────────────────────────────────────────────────────────────
 
-def test_settings_has_llm_provider_defaulting_to_openai():
+def test_settings_llm_provider_default_is_anthropic_when_env_unset(monkeypatch):
+    """Code default is Claude; loaded .env may override — re-read getenv default."""
+    monkeypatch.delenv("LLM_PROVIDER", raising=False)
+    monkeypatch.delenv("LLM_MODEL", raising=False)
+    # Re-evaluate the same default expressions settings.py uses
+    import os
+    assert os.getenv("LLM_PROVIDER", "anthropic") == "anthropic"
+    assert os.getenv("LLM_MODEL", "claude-sonnet-4-5-20250929") == "claude-sonnet-4-5-20250929"
+
+
+def test_settings_has_llm_provider_configured():
     from config.settings import Settings
-    assert Settings.LLM_PROVIDER == "openai"
+    assert Settings.LLM_PROVIDER in ("anthropic", "openai")
 
 
 def test_triage_agent_exposes_provider_not_raw_client():

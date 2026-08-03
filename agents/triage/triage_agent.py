@@ -11,8 +11,8 @@ Execution order:
   7. run()                — main entry point: reads Slack → groups → loops
 
 LLM provider is the brain. This file is the hands.
-Provider is configured via settings.LLM_PROVIDER — default "openai".
-To swap providers: create agents/llm/anthropic_provider.py and update factory.py.
+Provider is configured via settings.LLM_PROVIDER — default "anthropic" (Claude).
+Set LLM_PROVIDER=openai and LLM_MODEL=gpt-4o to use OpenAI instead.
 
 Memory strategy (Option A — lazy retrieval):
   - Semantic patterns injected into SYSTEM_PROMPT once per run (small, run-level).

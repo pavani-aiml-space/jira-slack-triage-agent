@@ -302,32 +302,17 @@ This adds one LLM call per ticket per run, parallel. No change to triage latency
 
 ---
 
-## Phase 9 — Anthropic Claude Provider
+## ✅ Phase 9 — Anthropic Claude Provider
 
-**Milestone:** Run the entire triage pipeline on Claude (claude-3-5-sonnet or claude-opus-4) by setting `LLM_PROVIDER=anthropic` in `.env` — zero business-logic changes required.
+**Milestone:** Run the entire triage pipeline on Claude by default; swap to OpenAI via `LLM_PROVIDER=openai`.
 
-> Prerequisite: Phase 8 ✅ complete.
+**Status: ✅ COMPLETE**
 
-### What this phase covers
-- `agents/llm/anthropic_provider.py` — implements `LLMProvider` protocol using the `anthropic` SDK
-- Key normalisation challenges (see Phase 8 roadmap for the full diff table):
-  - Tool schema: OpenAI `{"type":"function","function":{...}}` → Anthropic `{"name":..., "input_schema":{...}}`
-  - System prompt: injected via separate `system=` kwarg, not as `messages[0]`
-  - Stop signal: `stop_reason == "tool_use"` not `finish_reason == "tool_calls"`
-  - Tool call args: `block.input` (already dict) not `json.loads(function.arguments)`
-  - Tool result: different role/content shape
-  - Error: `anthropic.APIError` → `LLMProviderError`
-- `agents/llm/factory.py` — one `elif` branch
-- `config/settings.py` — validate that `ANTHROPIC_API_KEY` is set when `LLM_PROVIDER=anthropic`
-- `DEBT-016` resolution — consider neutral `ToolSchema` dataclass so tool files don't carry OpenAI-format dicts
-
-### What stays on OpenAI regardless
-- `pipeline/duplicate_detector.py` — embeddings (`text-embedding-3-small`); Anthropic has no embeddings API
-- `pipeline/semantic_store.py` — `summarise_with_llm()` can optionally migrate to `_provider` in a later phase
-
-### Effort estimate
-- 1 new file (`anthropic_provider.py`), 2 modified (`factory.py`, `settings.py`), ~10–15 new unit tests
-- Optional: neutral `ToolSchema` type (3 tool files + `base.py` + `openai_provider.py`) if DEBT-016 is resolved in same phase
+### What shipped
+- `agents/llm/anthropic_provider.py` — `AnthropicProvider` implements `LLMProvider`; converts OpenAI-format tool schemas and multi-turn tool messages to Anthropic format
+- `agents/llm/factory.py` — dispatches `anthropic` | `openai` for triage and judge
+- `config/settings.py` — defaults: `LLM_PROVIDER=anthropic`, `LLM_MODEL=claude-sonnet-4-5-20250929`; judge defaults to OpenAI for cross-family scoring
+- Embeddings remain on OpenAI regardless of triage provider
 
 ---
 

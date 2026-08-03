@@ -11,9 +11,12 @@ from pipeline.reaction_collector import fetch_reactions_for_pending
 
 
 def _pending(ts, run_id="r1"):
+    # posted_at must be within window_hours of "now" or the collector skips the row
+    from datetime import datetime, timezone
+    now = datetime.now(tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
     return PendingReaction(
         run_id=run_id, block_index=0, ticket_key="SCRUM-1",
-        confirmation_ts=ts, posted_at_iso="2026-04-29T10:00:00",
+        confirmation_ts=ts, posted_at_iso=now,
     )
 
 

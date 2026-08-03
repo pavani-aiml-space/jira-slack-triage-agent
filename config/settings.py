@@ -10,10 +10,11 @@ class Settings:
     # ── LLM ───────────────────────────────────────────────────────────────────
     ANTHROPIC_API_KEY: str = os.getenv("ANTHROPIC_API_KEY", "")
     OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
-    LLM_MODEL: str = os.getenv("LLM_MODEL", "gpt-4o")
-    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "openai")
-    # Currently only "openai" is supported.
-    # To add Anthropic: create agents/llm/anthropic_provider.py and update factory.py.
+    # Default triage brain: Claude. Set LLM_PROVIDER=openai + LLM_MODEL=gpt-4o to swap.
+    LLM_PROVIDER: str = os.getenv("LLM_PROVIDER", "anthropic")
+    LLM_MODEL: str = os.getenv("LLM_MODEL", "claude-sonnet-4-5-20250929")
+    LLM_MAX_TOKENS: int = int(os.getenv("LLM_MAX_TOKENS", "4096"))
+    # Embeddings always use OpenAI (Anthropic has no embeddings API).
 
     # ── Slack ──────────────────────────────────────────────────────────────────
     SLACK_BOT_TOKEN: str = os.getenv("SLACK_BOT_TOKEN", "")
@@ -61,7 +62,8 @@ class Settings:
 
     # ── Phase 5b — LLM-as-Judge (post-run scoring; opt-in) ────────────────────
     ENABLE_LLM_JUDGE: bool = os.getenv("ENABLE_LLM_JUDGE", "false").lower() in ("1", "true", "yes")
-    JUDGE_LLM_PROVIDER: str = os.getenv("JUDGE_LLM_PROVIDER", os.getenv("LLM_PROVIDER", "openai"))
+    # Default judge: OpenAI (different family from Claude triage) when unset.
+    JUDGE_LLM_PROVIDER: str = os.getenv("JUDGE_LLM_PROVIDER", "openai")
     JUDGE_LLM_MODEL: str = os.getenv("JUDGE_LLM_MODEL", "gpt-4o-mini")
     JUDGE_STORE_PATH: str = os.getenv("JUDGE_STORE_PATH", "memory/judge_store.json")
 
@@ -82,14 +84,27 @@ class Settings:
     @classmethod
     def validate(cls, required: list[str] | None = None) -> None:
         """Raise ValueError listing any missing required variables."""
-        checks = required or [
-            "ANTHROPIC_API_KEY",
-            "SLACK_BOT_TOKEN",
-            "SLACK_TEAM_ID",
-            "JIRA_URL",
-            "JIRA_EMAIL",
-            "JIRA_API_TOKEN",
-        ]
+        if required is not None:
+            checks = list(required)
+        else:
+            checks = [
+                "SLACK_BOT_TOKEN",
+                "SLACK_TEAM_ID",
+                "JIRA_URL",
+                "JIRA_EMAIL",
+                "JIRA_API_TOKEN",
+                "OPENAI_API_KEY",  # embeddings (duplicate gate) always need OpenAI
+            ]
+            provider = (cls.LLM_PROVIDER or "").strip().lower()
+            if provider == "anthropic":
+                checks.append("ANTHROPIC_API_KEY")
+            elif provider == "openai":
+                # OPENAI_API_KEY already listed for embeddings
+                pass
+            judge = (cls.JUDGE_LLM_PROVIDER or "").strip().lower()
+            if cls.ENABLE_LLM_JUDGE and judge == "anthropic":
+                if "ANTHROPIC_API_KEY" not in checks:
+                    checks.append("ANTHROPIC_API_KEY")
         missing = [k for k in checks if not getattr(cls, k, "")]
         if missing:
             raise ValueError(

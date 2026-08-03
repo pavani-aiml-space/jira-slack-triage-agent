@@ -332,7 +332,7 @@ OpenAIProvider.chat()
     → return LLMTurn(finish_reason, content, tool_calls, tokens, raw_message)
 ```
 
-**To add Anthropic:** create `agents/llm/anthropic_provider.py`, add one `elif` in `factory.py`, set `LLM_PROVIDER=anthropic` in `.env`. Zero changes to `triage_agent.py`.
+**To add Anthropic / swap providers:** `AnthropicProvider` ships by default. Set `LLM_PROVIDER=openai` + `LLM_MODEL=gpt-4o` to use OpenAI for triage. Embeddings stay on OpenAI either way.
 
 **Test impact:** 19 existing tests migrated from patching `_client` to patching `_provider`. New `make_llm_turn()` and `make_tool_call_turn()` helpers make multi-turn test setup one line. 17 new tests for the provider package.
 

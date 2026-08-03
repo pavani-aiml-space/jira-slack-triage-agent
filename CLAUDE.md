@@ -208,7 +208,8 @@ List the core files any new developer or workflow step should know about:
 - `agents/triage/triage_agent.py` — main LLM orchestrator; uses `_provider` (Phase 8 agnostic interface)
 - `agents/llm/base.py` — `LLMProvider` protocol, `LLMTurn`, `ToolCall`, `LLMProviderError` (Phase 8)
 - `agents/llm/openai_provider.py` — `OpenAIProvider` — wraps OpenAI SDK (Phase 8)
-- `agents/llm/factory.py` — `get_llm_provider(settings)` — selects provider from `LLM_PROVIDER` (Phase 8)
+- `agents/llm/anthropic_provider.py` — `AnthropicProvider` — wraps Anthropic Messages API; converts OpenAI-format tools/messages internally (Phase 9)
+- `agents/llm/factory.py` — `get_llm_provider(settings)` — selects provider from `LLM_PROVIDER` (`anthropic` default, `openai` optional)
 - `agents/triage/triage_agent.py` — main orchestrator; returns `RunLog`
 - `agents/triage/tools/jira_tools.py` — Jira ticket creation tool (via `jira_mcp_session()`)
 - `agents/triage/tools/slack_tools.py` — Slack posting tools + `_confirmation_ts_buffer` + `drain_confirmation_ts()`
@@ -341,9 +342,12 @@ MIN_REACTIONS_FOR_QUALITY   — (optional) total reactions required before any a
 REACTION_WINDOW_HOURS       — (optional) how far back to look for reactions, default 48
 REACTION_HISTORY_LIMIT      — (optional) max Slack messages to fetch for reaction polling, default 50
 QUALITY_STORE_PATH          — (optional) path to quality store JSON, default memory/quality_store.json
+LLM_PROVIDER                — (optional) LLM backend: "anthropic" (default) or "openai"
+LLM_MODEL                   — (optional) model for the configured provider; default claude-sonnet-4-5-20250929
+LLM_MAX_TOKENS              — (optional) max tokens for Anthropic Messages API, default 4096
 ENABLE_LLM_JUDGE            — (optional) `true` / `1` / `yes` to score each created ticket after the run (extra LLM calls); default false
 JUDGE_LLM_MODEL             — (optional) judge model when judge enabled, default gpt-4o-mini
-JUDGE_LLM_PROVIDER          — (optional) judge backend, default same as LLM_PROVIDER (only `openai` implemented)
+JUDGE_LLM_PROVIDER          — (optional) judge backend, default `openai` (cross-family vs Claude triage); also supports `anthropic`
 JUDGE_STORE_PATH            — (optional) append-only judge scores JSON, default memory/judge_store.json
 EPISODE_STORE_PATH          — (optional) path to episodic memory JSON, default memory/episode_store.json
 SEMANTIC_STORE_PATH         — (optional) path to semantic memory JSON, default memory/semantic_store.json
@@ -352,6 +356,6 @@ MAX_INJECTED_EPISODES       — (optional) max episodes to inject per block, def
 SEMANTIC_EXTRACTION_THRESHOLD — (optional) min new episodes since last extraction before re-extracting, default 5
 SEMANTIC_LLM_MIN_PATTERNS   — (optional) min patterns before triggering LLM summarisation, default 3
 MAX_SEMANTIC_PATTERN_CHARS  — (optional) max chars for semantic injection string, default 800
-LLM_PROVIDER                — (optional) LLM backend to use: "openai" (default). Set to "anthropic" when Phase 9 ships.
-LLM_MODEL                   — (optional) model name for the configured LLM provider, default gpt-4o
+ANTHROPIC_API_KEY           — Claude access when LLM_PROVIDER=anthropic (default)
+OPENAI_API_KEY              — embeddings always; also triage when LLM_PROVIDER=openai; judge when JUDGE_LLM_PROVIDER=openai
 ```
