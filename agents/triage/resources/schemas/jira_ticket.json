@@ -1,0 +1,22 @@
+{
+  "description": "Expected output schema when the triage agent creates or updates a Jira ticket",
+  "required_fields": {
+    "summary": "Short title, max 80 chars, imperative tone e.g. 'Fix login crash on iOS after deploy'",
+    "description": "Structured markdown with: ## What, ## Steps to Reproduce (bugs), ## Expected, ## Context",
+    "issue_type": "One of: Bug | Story | Task",
+    "priority": "One of: Critical | High | Medium | Low",
+    "labels": "List of strings e.g. ['mobile', 'regression', 'authentication']",
+    "project_key": "Jira project key e.g. DEV"
+  },
+  "optional_fields": {
+    "assignee": "Jira account ID — only set if confidently known",
+    "epic_link": "Jira epic key if message clearly belongs to a known epic",
+    "story_points": "Only set for Stories/Tasks, not Bugs"
+  },
+  "priority_guide": {
+    "Critical": "All users affected, production down, data loss, security issue",
+    "High":     "Significant feature broken, affects many users, workaround exists",
+    "Medium":   "Partial feature broken, affects some users, workaround available",
+    "Low":      "Minor issue, cosmetic, affects few users, or enhancement"
+  }
+}

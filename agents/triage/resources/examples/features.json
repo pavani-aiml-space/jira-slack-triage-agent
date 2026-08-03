@@ -1,0 +1,34 @@
+[
+  {
+    "slack_message": "would be amazing if we could export to Excel format, not just CSV. Our finance team keeps asking for this.",
+    "classification": "feature",
+    "priority": "Medium",
+    "title": "Add Excel export format alongside existing CSV export",
+    "labels": ["export", "finance"],
+    "reasoning": "Clear feature request, specific stakeholder identified, not urgent"
+  },
+  {
+    "slack_message": "Customer said SSO with Okta is a dealbreaker for them signing the contract.",
+    "classification": "feature",
+    "priority": "High",
+    "title": "Add Okta SSO integration for enterprise customers",
+    "labels": ["sso", "enterprise", "authentication"],
+    "reasoning": "Business-critical, dealbreaker signal, enterprise contract at risk"
+  },
+  {
+    "slack_message": "it would be cool to have dark mode",
+    "classification": "feature",
+    "priority": "Low",
+    "title": "Add dark mode theme option",
+    "labels": ["ui", "theme"],
+    "reasoning": "Nice-to-have, no business urgency, no user impact stated"
+  },
+  {
+    "slack_message": "Can we add keyboard shortcuts to the editor? Power users have been asking.",
+    "classification": "feature",
+    "priority": "Medium",
+    "title": "Add keyboard shortcuts to the editor for power users",
+    "labels": ["editor", "ux", "accessibility"],
+    "reasoning": "User-requested, improves power user experience, no urgency"
+  }
+]

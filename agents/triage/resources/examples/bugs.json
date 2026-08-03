@@ -1,0 +1,42 @@
+[
+  {
+    "slack_message": "the login button on mobile is completely broken, users can't sign in. Started after today's deploy. iOS and Android both affected.",
+    "classification": "bug",
+    "priority": "Critical",
+    "title": "Fix mobile login button broken on iOS and Android post-deploy",
+    "labels": ["mobile", "regression", "authentication"],
+    "reasoning": "All users affected on both platforms, production feature down, deploy correlation"
+  },
+  {
+    "slack_message": "PDF export crashes when file is larger than 10MB",
+    "classification": "bug",
+    "priority": "High",
+    "title": "Fix PDF export crash for files larger than 10MB",
+    "labels": ["export", "pdf"],
+    "reasoning": "Known reproduction condition, significant feature broken"
+  },
+  {
+    "slack_message": "the welcome email says 'Welcme' instead of 'Welcome'",
+    "classification": "bug",
+    "priority": "Low",
+    "title": "Fix typo in onboarding welcome email",
+    "labels": ["content", "email"],
+    "reasoning": "Cosmetic, affects no functionality"
+  },
+  {
+    "slack_message": "getting a 500 error on the checkout page when I add more than 10 items",
+    "classification": "bug",
+    "priority": "High",
+    "title": "Fix 500 error on checkout when cart exceeds 10 items",
+    "labels": ["checkout", "error"],
+    "reasoning": "Server error blocking a key user flow, reproduction steps known"
+  },
+  {
+    "slack_message": "the dashboard charts don't load on Safari but work fine on Chrome",
+    "classification": "bug",
+    "priority": "Medium",
+    "title": "Fix dashboard charts not loading on Safari",
+    "labels": ["dashboard", "browser-compatibility"],
+    "reasoning": "Partial feature broken, affects Safari users only, Chrome workaround available"
+  }
+]

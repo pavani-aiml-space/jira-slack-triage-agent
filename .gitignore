@@ -1,0 +1,26 @@
+# Environment
+config/.env
+.env
+*.env
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+.venv/
+venv/
+env/
+
+# Logs
+logs/
+*.log
+
+# Embedding cache
+memory/
+
+# Node (MCP servers use npx)
+node_modules/
+
+# IDE
+.DS_Store
+.cursor/

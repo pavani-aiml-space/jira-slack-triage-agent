@@ -1,0 +1,19 @@
+{
+  "description": "Structure of a Slack message as returned by the Slack MCP server",
+  "fields": {
+    "text": "The raw message content",
+    "user": "Slack user ID of the sender (e.g. U0123456)",
+    "username": "Display name of the sender",
+    "ts": "Timestamp string used as message ID (e.g. 1713400000.000100)",
+    "channel": "Channel ID where the message was posted (e.g. C0123456)",
+    "channel_name": "Human-readable channel name (e.g. dev-bugs)",
+    "thread_ts": "Timestamp of the parent message if this is a reply (null if top-level)",
+    "reactions": "List of emoji reactions on the message",
+    "permalink": "Full Slack URL to this message"
+  },
+  "notes": [
+    "thread_ts is null for top-level messages",
+    "Use ts as thread_ts when replying to a top-level message",
+    "user is an ID — use slack_get_user_info to resolve to a name"
+  ]
+}

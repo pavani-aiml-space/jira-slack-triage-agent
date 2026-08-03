@@ -1,0 +1,291 @@
+{
+  "_notes": "Ground-truth labeled examples for eval regression testing. Each example is a Slack message (or conversation block) with the correct Jira classification. Source: 'manual' = human-curated, 'validated' = team 👍 confirmed in production.",
+  "labels": [
+
+    {
+      "id": "bug-high-001",
+      "source": "manual",
+      "slack_text": "App crashes when uploading any file larger than 10MB. Tried three times, reproducible every time. We're losing customer uploads.",
+      "correct_type": "Bug",
+      "correct_priority": "High",
+      "correct_action": "create_jira_ticket",
+      "notes": "Reproducible crash with direct customer impact. 'We're losing customer uploads' is the impact signal.",
+      "tricky": false
+    },
+
+    {
+      "id": "bug-high-002",
+      "source": "manual",
+      "slack_text": "Login is completely broken — getting a 500 error on every login attempt. Nobody can sign in.",
+      "correct_type": "Bug",
+      "correct_priority": "High",
+      "correct_action": "create_jira_ticket",
+      "notes": "Total feature failure with broad user impact.",
+      "tricky": false
+    },
+
+    {
+      "id": "bug-high-003",
+      "source": "manual",
+      "slack_text": "Payment processing is failing for all Visa cards. Stripe is returning a 402. Our checkout is down.",
+      "correct_type": "Bug",
+      "correct_priority": "High",
+      "correct_action": "create_jira_ticket",
+      "notes": "Revenue-impacting, production-down. High even though the root cause is a third-party API.",
+      "tricky": false
+    },
+
+    {
+      "id": "bug-high-004",
+      "source": "manual",
+      "slack_text": "Alice: the /api/users endpoint is returning 404\nBob: yeah same, started about an hour ago\nCharlie: all GET requests to that endpoint are failing, not just one user",
+      "correct_type": "Bug",
+      "correct_priority": "High",
+      "correct_action": "create_jira_ticket",
+      "notes": "Multi-person block confirming the same issue. Three reporters + 'all GET requests' = High. One ticket for the block, not one per person.",
+      "tricky": true
+    },
+
+    {
+      "id": "bug-medium-001",
+      "source": "manual",
+      "slack_text": "The CSV export is missing the last row of data. Just noticed it when auditing a report.",
+      "correct_type": "Bug",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "Data integrity bug but not blocking. User can still export, just incomplete.",
+      "tricky": false
+    },
+
+    {
+      "id": "bug-medium-002",
+      "source": "manual",
+      "slack_text": "Profile picture doesn't update immediately after uploading. You have to do a full page refresh to see the new one.",
+      "correct_type": "Bug",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "UI inconsistency on a core feature. Not Low because it's profile — a frequently used flow.",
+      "tricky": false
+    },
+
+    {
+      "id": "bug-medium-003",
+      "source": "manual",
+      "slack_text": "Search results are showing deleted items. Tested with three different deleted entries — all showing up.",
+      "correct_type": "Bug",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "Data correctness issue. Showing deleted data is a trust problem. Medium.",
+      "tricky": false
+    },
+
+    {
+      "id": "bug-medium-004",
+      "source": "manual",
+      "slack_text": "Email notifications from the app are going to spam for a few of our users. Not all of them, but three people mentioned it this week.",
+      "correct_type": "Bug",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "Affects a subset of users, deliverability issue. Medium not High because it's partial and not blocking core function.",
+      "tricky": false
+    },
+
+    {
+      "id": "bug-low-001",
+      "source": "manual",
+      "slack_text": "There's a typo on the settings page — 'Prefernces' should be 'Preferences'.",
+      "correct_type": "Bug",
+      "correct_priority": "Low",
+      "correct_action": "create_jira_ticket",
+      "notes": "Cosmetic defect. Bug (it's wrong) not Task — the word is there, just misspelled.",
+      "tricky": false
+    },
+
+    {
+      "id": "bug-low-002",
+      "source": "manual",
+      "slack_text": "The sidebar menu flickers briefly when you first load the dashboard in Chrome. Doesn't affect functionality.",
+      "correct_type": "Bug",
+      "correct_priority": "Low",
+      "correct_action": "create_jira_ticket",
+      "notes": "Visual glitch, no functional impact, browser-specific. Bug not Task — something is rendering incorrectly.",
+      "tricky": false
+    },
+
+    {
+      "id": "story-medium-001",
+      "source": "manual",
+      "slack_text": "It would be really helpful to have a bulk export option for all reports at once instead of exporting them one by one.",
+      "correct_type": "Story",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "New capability. 'Would be really helpful' and 'instead of' = feature request not defect.",
+      "tricky": false
+    },
+
+    {
+      "id": "story-high-001",
+      "source": "manual",
+      "slack_text": "We need to add two-factor authentication before the enterprise launch next month. This is a blocker for the deal.",
+      "correct_type": "Story",
+      "correct_priority": "High",
+      "correct_action": "create_jira_ticket",
+      "notes": "TRICKY: sounds like a task but 2FA doesn't exist yet — it's a new capability. High because of explicit business-impact signal ('blocker for the deal'). Story:High not Task:High.",
+      "tricky": true
+    },
+
+    {
+      "id": "story-medium-002",
+      "source": "manual",
+      "slack_text": "Can we support assigning a ticket to multiple people? Right now it's only one assignee.",
+      "correct_type": "Story",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "TRICKY: new behaviour on an existing feature. Story, not Bug — single assignee is the current intended behaviour, not a defect.",
+      "tricky": true
+    },
+
+    {
+      "id": "story-low-001",
+      "source": "manual",
+      "slack_text": "Would be nice to have dark mode in the mobile app at some point.",
+      "correct_type": "Story",
+      "correct_priority": "Low",
+      "correct_action": "create_jira_ticket",
+      "notes": "'At some point' and 'would be nice' both signal Low. This is a wish, not a need.",
+      "tricky": false
+    },
+
+    {
+      "id": "task-medium-001",
+      "source": "manual",
+      "slack_text": "We need to upgrade our React version to 18.x before next quarter. Current version has known security vulnerabilities.",
+      "correct_type": "Task",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "Technical work item. Security angle raises from Low to Medium but it's not a breach and not breaking = Medium not High.",
+      "tricky": false
+    },
+
+    {
+      "id": "task-medium-002",
+      "source": "manual",
+      "slack_text": "We should add structured logging to the payment service. Right now debugging production issues means reading through unstructured stdout.",
+      "correct_type": "Task",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "Operational improvement. No new user-facing feature, no broken behaviour. Task:Medium.",
+      "tricky": false
+    },
+
+    {
+      "id": "task-medium-003",
+      "source": "manual",
+      "slack_text": "We need to set up a staging environment for the new payments microservice.",
+      "correct_type": "Task",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "Infrastructure setup. No new user-facing capability, no defect. Task not Story — the output is an environment, not a feature.",
+      "tricky": false
+    },
+
+    {
+      "id": "task-low-001",
+      "source": "manual",
+      "slack_text": "The README hasn't been updated to reflect the new deployment process. New engineers are following outdated instructions.",
+      "correct_type": "Task",
+      "correct_priority": "Low",
+      "correct_action": "create_jira_ticket",
+      "notes": "Documentation update. No code change, no user-facing impact.",
+      "tricky": false
+    },
+
+    {
+      "id": "task-high-001",
+      "source": "manual",
+      "slack_text": "We need to rotate the AWS API keys immediately — they were accidentally committed to the public GitHub repo this morning.",
+      "correct_type": "Task",
+      "correct_priority": "High",
+      "correct_action": "create_jira_ticket",
+      "notes": "TRICKY: security incident. Task (rotate keys — no new feature, no bug in the product) but High — time-sensitive, active exposure. Agent often misclassifies as Bug.",
+      "tricky": true
+    },
+
+    {
+      "id": "tricky-bug-not-story-001",
+      "source": "manual",
+      "slack_text": "The app should warn me before I permanently delete a project. I just deleted the wrong one and there's no way to recover it.",
+      "correct_type": "Bug",
+      "correct_priority": "High",
+      "correct_action": "create_jira_ticket",
+      "notes": "TRICKY: phrased as a feature request ('should warn me') but the missing confirmation guard caused unrecoverable data loss. That makes it a Bug:High, not a Story.",
+      "tricky": true
+    },
+
+    {
+      "id": "tricky-task-not-bug-001",
+      "source": "manual",
+      "slack_text": "The API docs are completely wrong for the /orders endpoint — they show the old request format we changed 3 months ago.",
+      "correct_type": "Task",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "TRICKY: 'completely wrong' sounds like Bug but the API itself is correct — the docs are a separate artefact that is outdated. Task:Medium.",
+      "tricky": true
+    },
+
+    {
+      "id": "tricky-multi-reporter-high-001",
+      "source": "manual",
+      "slack_text": "Alice: getting a white screen on the reports page\nBob: same here, just happened to me\nAlice: seems like it started after this morning's deploy",
+      "correct_type": "Bug",
+      "correct_priority": "High",
+      "correct_action": "create_jira_ticket",
+      "notes": "TRICKY: multi-reporter block. Two confirmations + deploy correlation = likely regression. Bug:High. One ticket for the whole block.",
+      "tricky": true
+    },
+
+    {
+      "id": "tricky-priority-context-001",
+      "source": "manual",
+      "slack_text": "The onboarding email has a broken link to the docs site.",
+      "correct_type": "Bug",
+      "correct_priority": "Medium",
+      "correct_action": "create_jira_ticket",
+      "notes": "TRICKY on priority: broken link in a transactional email that goes to every new user = broader impact than a broken link on an internal page. Medium not Low.",
+      "tricky": true
+    },
+
+    {
+      "id": "clarify-vague-001",
+      "source": "manual",
+      "slack_text": "Something's wrong with the dashboard.",
+      "correct_type": null,
+      "correct_priority": null,
+      "correct_action": "ask_for_clarification",
+      "notes": "Not enough to classify. Ask: what specifically is wrong, which part, when did it start, any error message?",
+      "tricky": false
+    },
+
+    {
+      "id": "clarify-vague-002",
+      "source": "manual",
+      "slack_text": "The app feels slow lately.",
+      "correct_type": null,
+      "correct_priority": null,
+      "correct_action": "ask_for_clarification",
+      "notes": "Vague performance complaint. No specific page, no reproduction steps, no baseline. Ask: which part, how slow, started when?",
+      "tricky": false
+    },
+
+    {
+      "id": "clarify-vague-003",
+      "source": "manual",
+      "slack_text": "Users are complaining about the checkout.",
+      "correct_type": null,
+      "correct_priority": null,
+      "correct_action": "ask_for_clarification",
+      "notes": "Second-hand report with no detail. 'Complaining' about what? Error? Slow? Confusing UI? Ask before creating a ticket.",
+      "tricky": false
+    }
+  ]
+}
