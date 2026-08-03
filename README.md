@@ -76,8 +76,9 @@ Then posts back: *"Created SCRUM-3 → https://yoursite.atlassian.net/browse/SCR
 | Structured run logs, run summaries, Streamlit dashboard | ✅ |
 | Duplicate detection via embedding similarity gate | ✅ |
 | Quality feedback loop — 👍/👎 Slack reactions → rolling quality metrics → alerting | ✅ |
+| Eval framework — golden dataset (labeled fixtures) + LLM-as-judge scoring on type/priority/title/description fit | ✅ |
 | Episodic + semantic memory — the agent gets smarter across runs, not just within one | ✅ |
-| Model-agnostic LLM provider — swap OpenAI ↔ Anthropic via one config value | ✅ |
+| Model-agnostic LLM provider — Claude by default; swap to OpenAI via `LLM_PROVIDER` | ✅ |
 | Scheduled / continuous execution, event-driven Slack trigger | ⬜ planned |
 
 Full breakdown in [`PROJECT_ROADMAP.md`](PROJECT_ROADMAP.md).
@@ -89,7 +90,7 @@ Full breakdown in [`PROJECT_ROADMAP.md`](PROJECT_ROADMAP.md).
 | Layer | Technology |
 |---|---|
 | Language | Python 3.11, fully async |
-| LLM | GPT-4o via `openai` SDK, behind a provider-agnostic interface |
+| LLM | Claude (default) via Anthropic SDK, or GPT-4o via OpenAI — provider-agnostic interface |
 | Slack | Slack MCP server |
 | Jira | Jira REST API v3 |
 | Memory | SQLite / JSON — episodic decisions + extracted semantic patterns |
@@ -98,24 +99,9 @@ Full breakdown in [`PROJECT_ROADMAP.md`](PROJECT_ROADMAP.md).
 
 ---
 
-## My approach
+## Engineering process
 
-I didn't start by opening an editor. Before any code existed, I worked through this in order:
-
-1. **Wrote down what I actually wanted this to do** — the goal, the scope, and how it would create value — before deciding on any implementation. This became the customer-problem framing in `docs/plans/*-brainstorm.md`: who the actors are, what "done" looks like, and what's explicitly out of scope.
-2. **Broke it into tasks.** The roadmap isn't one big build — it's phases (core pipeline → failure transparency → observability → duplicate detection → eval/feedback → memory → provider abstraction), each with its own milestone and its own definition of done.
-3. **Wrote the golden dataset and evals before writing the feature.** `tests/eval/label_fixtures.json` and the classification playbook in `tests/eval/FIXTURES_GUIDE.md` define what "correct" means — Bug vs. Story vs. Task, High vs. Medium vs. Low — *before* any classification code was scored against it. Judge calibration (gold + mismatch runs) came before the judge was trusted for anything.
-4. **Used a structured process instead of vibecoding.** Every feature went through the same gate: `/brainstorm` (what/why) → `/design` (how) → `/plan` (exact files, tests, order) → `/build` (red/green/refactor/commit) → `/audit` (tests pass + behavior verified) → `/kaizen` (cleanup, debt logged) → `/closeout` (docs + history written). Hard rule: no `/design` without an approved brainstorm, no `/build` without an approved plan, no `/closeout` without a passing audit. Slower per feature, close to zero rework.
-
----
-
-## What I learned building this
-
-- **Writing the eval before the feature forces you to define "correct" up front.** The tricky-case table in `FIXTURES_GUIDE.md` (a missing safety guard is a Bug, not a Story; a wrong doc is a Task, not a Bug) only exists because I had to write down the rule *before* I had code to rationalize around.
-- **Mock only at real process boundaries.** I broke four tests by mocking a pure in-memory list-append (`add_episode`) — the mock made a threshold check silently pass because the state it depended on never actually mutated. Disk, network, and subprocess calls are mock targets. Plain Python state mutation is not.
-- **Explicit state beats a side channel, even when the side channel looks simpler.** Passing memory into the agent as an explicit `MemoryContext` object (rather than a module-level dict another module writes into) cost one extra parameter and paid for itself immediately — every test could construct it directly instead of patching hidden global state.
-- **The moment a function starts managing "before" and "after" a core step, split it out.** Eval logic (pre-run reaction collection, post-run judge scoring) started inside the main run loop. Pulling it into its own `eval_runner.py` turned a fragile order-of-operations test into a ten-line one.
-- **A running "learnings" log compounds.** Every session ends with three questions answered in `docs/LEARNINGS.md`: what broke and why, what took longer than expected, what I'd tell myself at the start. Reading that file at the start of the *next* brainstorm caught at least two repeat mistakes before they happened again.
+This was built with a golden dataset and evals written *before* the classification feature itself, and a structured brainstorm → design → plan → build → audit → kaizen → closeout workflow for every feature — not vibecoded. Full write-up of the approach and lessons learned is in [`docs/ENGINEERING_PROCESS.md`](docs/ENGINEERING_PROCESS.md).
 
 ---
 
@@ -131,7 +117,10 @@ cp config/.env.example config/.env
 Fill in `config/.env`:
 
 ```
-OPENAI_API_KEY=sk-...
+LLM_PROVIDER=anthropic
+LLM_MODEL=claude-sonnet-4-5-20250929
+ANTHROPIC_API_KEY=sk-ant-...
+OPENAI_API_KEY=sk-...            # still required for embeddings (duplicate detection)
 SLACK_BOT_TOKEN=xoxb-...
 SLACK_CHANNEL_ID=C...
 JIRA_URL=https://yoursite.atlassian.net
@@ -140,7 +129,16 @@ JIRA_API_TOKEN=ATATT3x...
 JIRA_PROJECT_KEY=SCRUM
 ```
 
+To use OpenAI for triage instead of Claude:
+
+```
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-4o
+```
+
 > **Gotcha:** `JIRA_EMAIL` must exactly match the email of the Atlassian account that generated the API token — a mismatch returns 401 even with a valid token. See `docs/LEARNINGS.md`.
+
+> **Gotcha:** Duplicate detection embeddings always use OpenAI (`OPENAI_API_KEY`), even when triage runs on Claude.
 
 Invite the bot to the channel (`/invite @your-bot-name`), then:
 
@@ -172,7 +170,7 @@ JiraSlack/
 ├── agents/
 │   ├── triage/triage_agent.py    # GPT-4o tool-calling loop
 │   ├── triage/tools/             # create_jira_ticket, post_slack_message, ask_for_clarification
-│   └── llm/                      # Provider-agnostic LLM interface (OpenAI today, Anthropic-ready)
+│   └── llm/                      # Provider-agnostic LLM (Anthropic default, OpenAI optional)
 ├── memory/                       # Episodic + semantic stores, embedding cache
 ├── tests/
 │   ├── unit/                     # 266 tests, all I/O mocked
@@ -189,6 +187,6 @@ JiraSlack/
 
 ---
 
-## Development process (the part that isn't the agent)
+## Development process
 
-This repo was built using a portable 7-step SDLC — `/brainstorm → /design → /plan → /build → /audit → /kaizen → /closeout` — defined in `.agent/workflows/` and referenced from `CLAUDE.md`. It's project-agnostic: copying the `.agent/workflows/` folder and filling in the "Workflow Contracts" section of `CLAUDE.md` (test runner, key modules, mocking conventions) is enough to reuse it on a different codebase.
+See [`docs/ENGINEERING_PROCESS.md`](docs/ENGINEERING_PROCESS.md) for the full write-up of the 7-step SDLC (`/brainstorm → /design → /plan → /build → /audit → /kaizen → /closeout`) used to build this, the approach taken, and lessons learned along the way.
