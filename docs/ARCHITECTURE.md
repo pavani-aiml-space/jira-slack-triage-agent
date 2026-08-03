@@ -14,6 +14,31 @@ JiraSlack replaces that human step with an AI agent that runs on demand, reads t
 
 ---
 
+## End-to-End Flow
+
+```mermaid
+flowchart TD
+    Start(["run_triage.py"]) --> Mem["Load episodic + semantic memory"]
+    Mem --> Fetch["Fetch new Slack messages\nvia Slack MCP"]
+    Fetch --> Group["Group into 5-min\nconversation blocks"]
+    Group --> Dup{{"Duplicate?\nembedding similarity >= 0.85"}}
+    Dup -- yes --> PostDup["Post existing ticket link\nvia Slack MCP"]
+    Dup -- no --> Agent["LLM triage agent\nclassify type / priority / confidence\n+ memory context"]
+    Agent --> Conf{{"Confidence"}}
+    Conf -- ">= 0.90 auto-act" --> Create["create_jira_ticket\nvia Jira MCP"]
+    Conf -- "0.65-0.90 flag" --> Create
+    Conf -- "less than 0.65 ask human" --> Ask["ask_for_clarification\nvia Slack MCP"]
+    Create --> Confirm["Post confirmation to Slack"]
+    Ask --> Confirm
+    PostDup --> Confirm
+    Confirm --> React["Collect reactions next run\n(quality signal)"]
+    Confirm --> Judge["LLM-as-judge scoring\n(optional, vs golden dataset)"]
+    React --> Persist["Write episode +\nextract semantic patterns"]
+    Judge --> Persist
+    Persist --> Watermark["Save watermark"]
+    Watermark -. next scheduled run .-> Start
+```
+
 ## The Pipeline at 30,000 Feet
 
 ```

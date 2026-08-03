@@ -46,6 +46,8 @@ flowchart LR
     H --> J
 ```
 
+This covers the per-message routing logic. For the full system — memory load/persist, the eval and quality-feedback loop, and how everything connects across runs — see the [end-to-end flow diagram](docs/ARCHITECTURE.md#end-to-end-flow) in the architecture doc.
+
 **Concrete example:**
 
 > **Pavani, 9:15 AM:** "login page is crashing when password is empty"
