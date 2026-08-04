@@ -2,7 +2,7 @@
 
 > Reads Slack. Creates Jira tickets automatically and flags it when it's not sure.
 
-JiraSlack watches a Slack channel for bug reports, feature requests, and tasks, classifies each one with GPT-4o, and creates a structured Jira ticket automatically. When it's confident, it acts. When it isn't, it asks. It never fails silently, and it never files the same bug twice.
+JiraSlack watches a Slack channel for bug reports, feature requests, and tasks, classifies each one with an LLM (Claude by default), and creates a structured Jira ticket automatically. When it's confident, it acts. When it isn't, it flags the ticket or asks a human to confirm before filing. It never fails silently, and it never files the same bug twice.
 
 ```bash
 python run_triage.py
@@ -98,8 +98,8 @@ Full breakdown in [`PROJECT_ROADMAP.md`](PROJECT_ROADMAP.md).
 | LLM | Claude (default) via Anthropic SDK, or GPT-4o via OpenAI — provider-agnostic interface |
 | Slack | Slack MCP server |
 | Jira | Jira REST API v3 |
-| Memory | SQLite / JSON — episodic decisions + extracted semantic patterns |
-| Tests | pytest + pytest-asyncio — 277 tests, all I/O mocked at the process boundary |
+| Memory | JSON files — episodic decisions, extracted semantic patterns, pending confirmations, embedding cache |
+| Tests | pytest + pytest-asyncio — 341 tests (330 unit + 11 integration), all I/O mocked at the process boundary |
 | Observability | Structured run logs + Streamlit dashboard |
 
 ---
@@ -113,8 +113,8 @@ This was built with a golden dataset and evals written *before* the classificati
 ## Quickstart
 
 ```bash
-git clone <repo>
-cd JiraSlack
+git clone https://github.com/pavani-aiml-space/jira-slack-triage-agent.git
+cd jira-slack-triage-agent
 pip install -r requirements.txt
 cp config/.env.example config/.env
 ```
@@ -171,18 +171,22 @@ pytest -v                     # full suite
 JiraSlack/
 ├── run_triage.py                 # Entry point
 ├── config/settings.py            # Typed settings, all config from .env
-├── pipeline/                     # Slack fetch, context grouping, duplicate detection, eval, memory lifecycle
+├── pipeline/                     # Slack fetch, context grouping, duplicate detection, eval,
+│                                  # memory lifecycle, confidence routing, pending-confirmation resolution
 ├── agents/
-│   ├── triage/triage_agent.py    # GPT-4o tool-calling loop
-│   ├── triage/tools/             # create_jira_ticket, post_slack_message, ask_for_clarification
+│   ├── triage/triage_agent.py    # LLM tool-calling loop (Claude by default)
+│   ├── triage/tools/             # create_jira_ticket, post_slack_message, ask_for_clarification,
+│   │                              # search_memory, confirmation_tools (low-confidence escalation)
 │   └── llm/                      # Provider-agnostic LLM (Anthropic default, OpenAI optional)
-├── memory/                       # Episodic + semantic stores, embedding cache
+├── mcp_servers/                  # MCP client + per-server configs (Slack MCP, mcp-atlassian) — swappable
+├── memory/                       # Episodic + semantic stores, embedding cache, pending confirmations
 ├── tests/
-│   ├── unit/                     # 266 tests, all I/O mocked
+│   ├── unit/                     # 330 tests, all I/O mocked
 │   ├── integration/              # 11 tests, real MCP connections, read-only
 │   └── eval/                     # Golden dataset + classification labeling guide
 ├── docs/
 │   ├── plans/                    # Brainstorm → design → plan doc per feature
+│   ├── ARCHITECTURE.md           # Full system walkthrough + end-to-end flow diagram
 │   ├── LEARNINGS.md              # Gotchas and decisions, written after every session
 │   └── BUGS.md                   # Active bugs and tech debt
 ├── .agent/workflows/              # The SDLC commands described above
