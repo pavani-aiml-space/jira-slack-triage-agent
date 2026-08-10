@@ -10,7 +10,7 @@ python run_triage.py
 
 ---
 
-## Why this exists
+## The problem
 
 Teams have conversations that are already happening, live, in a Slack channel. 
 Someone still has to read every message, decide if it's ticket-worthy, classify it, and create it in Jira by hand. 
