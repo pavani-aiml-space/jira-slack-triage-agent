@@ -1,8 +1,6 @@
 # JiraSlack: System Architecture
 
 > Simple walkthrough of the entire system: what every component does, how they connect, and why each design decision was made.
->
-> Updated: 2026-08-04 (post Phase 9, confidence routing)
 
 ---
 
@@ -24,8 +22,12 @@ flowchart TD
     Fetch --> Group["Group into 5-min\nconversation blocks"]
     Group --> Dup{{"Duplicate?\nembedding similarity >= 0.85"}}
     Dup -- yes --> PostDup["Post existing ticket link\nvia Slack MCP"]
-    Dup -- no --> Agent["LLM triage agent\nclassify type / priority + self-assessed confidence\n+ memory context"]
-    Agent --> Conf{{"route_confidence()"}}
+    Dup -- no --> Classify["_classify_block(): one structured LLM call\nsubmit_triage_decisions + memory context"]
+    Classify --> Decisions["List of decisions\n(0 or more per block)"]
+    Decisions --> Dispatch{{"_execute_decisions()\ndeterministic, per decision, no model involved"}}
+    Dispatch -- "create_ticket\n+ self-assessed confidence" --> Conf{{"route_confidence()"}}
+    Dispatch -- "ask_clarification" --> AskClar["Post clarifying question to Slack"]
+    Dispatch -- "duplicate\n(referenced in the conversation itself)" --> PostDupConv["Post duplicate note to Slack"]
     Conf -- ">= 0.90 auto-act" --> Create["create_jira_ticket\nvia Jira MCP"]
     Conf -- "0.65-0.90 flag" --> CreateFlag["create_jira_ticket\n+ needs-review label"]
     Conf -- "< 0.65 escalate" --> Propose["Propose ticket to Slack,\npersist as pending confirmation"]
@@ -53,7 +55,7 @@ python run_triage.py
 │ 1. Load memory (episodic + semantic)                                │
 │ 2. Collect Slack reactions from previous run (quality signal)       │
 │ 3. Read Slack channel → group into conversation blocks              │
-│ 4. For each block: duplicate gate → LLM tool loop (Claude default)  │
+│ 4. For each block: duplicate gate → one structured call → dispatch  │
 │ 5. Register new confirmation posts for next run's reaction polling  │
 │ 6. Save new episodes, extract semantic patterns                     │
 └─────────────────────────────────────────────────────────────────────┘
@@ -155,24 +157,27 @@ If a `MemoryContext` was passed in:
 
 **Why semantic → system prompt, episodes → user message:** Semantic patterns are run-level context (the same for every block). Injecting them once into the system prompt is efficient. Episodes are block-level context (the top-K most relevant past decisions for *this specific block*), they belong in the user message.
 
-### 3f. For each block: LLM tool-calling loop
+### 3f. For each block: one structured call, then deterministic dispatch
 
-`_run_llm_loop()` sends the block text (plus any memory context) to the LLM provider (Claude by default since Phase 9; see `agents/llm/factory.py`) with four tools available:
+`_classify_block()` sends the block text (plus any memory context) to the LLM provider (Claude by default since Phase 9; see `agents/llm/factory.py`) with exactly one tool available, `submit_triage_decisions`. The model calls it once, returning a list of decisions, 0 or more, one per distinct actionable item it found in the block. There is no loop: one block always means one LLM call, regardless of how many decisions come back.
 
-| Tool | When the LLM calls it | What it does |
+`_execute_decisions()` then walks that list in plain code, no further model involvement:
+
+| Decision action | What triggers it | What happens |
 |------|---------------------|--------------|
-| `create_jira_ticket` | Classified as Bug, Story, or Task | Requires a self-assessed `confidence`; `route_confidence()` then decides in code: `>= CONFIDENCE_AUTO_ACT` files directly, `>= CONFIDENCE_ASK_HUMAN` files with a `needs-review` flag, below that files nothing yet and escalates to Slack for human confirmation instead |
-| `post_slack_message` | Needs to notify the team about something (duplicate, ticket confirmation, quality flag, etc.) | Posts a message to the channel via Slack MCP |
-| `ask_for_clarification` | Classified as Unclear, not enough information to act on | Posts a question to Slack asking for missing details. No ticket is created for this path (see Priority Rule 2 in `CLAUDE.md`) |
-| `search_memory` | Uncertain about type, priority, or whether something similar was triaged before | Retrieves similar past episodes by embedding similarity, on demand (lazy retrieval, not pre-injected per block) |
+| `create_ticket` | Classified as Bug, Story, or Task | Calls `create_jira_ticket()` directly. It requires a self-assessed `confidence`; `route_confidence()` then decides in code: `>= CONFIDENCE_AUTO_ACT` files directly (dispatch posts the Slack confirmation), `>= CONFIDENCE_ASK_HUMAN` files with a `needs-review` flag, below that files nothing yet and escalates to Slack for human confirmation instead (dispatch posts nothing further, the escalation path already posted) |
+| `ask_clarification` | Classified as Unclear, not enough information to act on | Calls `ask_for_clarification()` directly, which posts a question to Slack. No ticket is created for this path (see Priority Rule 2 in `CLAUDE.md`) |
+| `duplicate` | The conversation itself references an already-filed ticket (a case the embedding-based gate in 3d can't catch, since that only compares against ticket *summaries*, not conversation text) | Posts a short note to Slack referencing the known ticket. No ticket is created |
 
-The loop continues until the LLM returns a response with no tool calls, or `MAX_AGENT_ITERATIONS` is reached.
+Episode retrieval is not part of this call either, it happens deterministically before `_classify_block()` runs (see 3e), reusing the duplicate gate's block embedding and gated by `EPISODE_SIMILARITY_THRESHOLD`.
 
-**Why tool-calling instead of a classifier:** A pure classifier can only output a label. Tool-calling lets the LLM both classify and act in the same step. It also allows the model to call multiple tools in one pass (e.g. create a ticket *and* post a quality flag) without an extra round-trip.
+A block that yields multiple decisions (two distinct issues reported in one message) produces multiple independent `BlockResult` entries in the run log, not one record overwritten by the last decision processed.
+
+**Why structured output plus deterministic dispatch, not a tool-calling loop:** A pure classifier can only output one label per block, which breaks down when a block reports more than one issue. An open-ended tool-calling loop solves that, but then leaves the model deciding *how many actions to take and in what order* too, which is exactly the kind of judgment call this project deliberately keeps out of the loop elsewhere (the duplicate gate, confidence routing). Returning a list of decisions from one call keeps the multi-issue flexibility while moving "how many actions, in what order, does this one need a Slack post" back into deterministic code.
 
 ### 3g. Capture confirmation timestamps
 
-After each `ticket_created` event, `drain_confirmation_ts()` retrieves the Slack `message_ts` of the confirmation post from `slack_tools._confirmation_ts_buffer`. These timestamps are stored in the `RunLog` for later use by `run_eval_step(run_log)`.
+This happens inline inside `_execute_decisions()` (3f), not as a separate step: right after posting a `ticket_created` confirmation to Slack, `drain_confirmation_ts()` retrieves that post's `message_ts` from `slack_tools._confirmation_ts_buffer` and attaches it to that decision's `BlockResult`. These timestamps are stored in the `RunLog` for later use by `run_eval_step(run_log)`.
 
 ---
 
@@ -189,7 +194,7 @@ After each `ticket_created` event, `drain_confirmation_ts()` retrieves the Slack
 ### Write new episodes
 
 For every `ticket_created` entry in the `RunLog`, a new `Episode` is appended to the `EpisodeStore`:
-- `block_snippet`: the first 200 characters of the Slack block text (for display)
+- `block_snippet`: the first 60 characters of the Slack block text (for display)
 - `ticket_summary`: the Jira ticket title that was created
 - `embedding`: the float vector of the ticket summary (used for retrieval)
 
@@ -199,7 +204,7 @@ The store is pruned to `MAX_EPISODES` (oldest removed first) and saved to `memor
 
 If the number of new episodes since the last extraction is ≥ `SEMANTIC_EXTRACTION_THRESHOLD`:
 1. `extract_count_patterns()` tallies `(ticket_type, priority, keyword)` triples across all episodes, this is fast, pure, and requires no API call.
-2. If there are ≥ `SEMANTIC_LLM_MIN_PATTERNS` patterns, `summarise_with_llm()` sends the patterns to GPT-4o and asks it to write a concise natural-language summary (max `MAX_SEMANTIC_PATTERN_CHARS` chars). This summary becomes the `semantic_injection` string on the next run.
+2. If there are ≥ `SEMANTIC_LLM_MIN_PATTERNS` patterns, `summarise_with_llm()` asks an LLM to write a concise natural-language summary (max `MAX_SEMANTIC_PATTERN_CHARS` chars). This summary becomes the `semantic_injection` string on the next run.
 3. If the LLM call fails, the raw count-based summary is used instead (Rule 10, never block on LLM extraction failure).
 
 ---
@@ -234,17 +239,13 @@ All Jira calls go through `jira_mcp_session()`, which works the same way using t
 
 ### LLM provider (`agents/llm/`, Claude default since Phase 9)
 
-The main triage tool-calling loop (`triage_agent._run_llm_loop()`) goes through a provider-agnostic interface, not a direct SDK call. `agents/llm/factory.py` dispatches to `AnthropicProvider` (default, `LLM_PROVIDER=anthropic`) or `OpenAIProvider` (`LLM_PROVIDER=openai`), both implementing the same `LLMProvider` protocol (`chat()` returning a normalized `LLMTurn`). `AnthropicProvider` converts the OpenAI-format tool schemas and multi-turn tool messages to Anthropic's format internally, so `triage_agent.py` itself stays provider-agnostic.
+Two call sites go through the same provider-agnostic interface, not a direct SDK call: the main triage classification call (`triage_agent._classify_block()`) and semantic pattern summarisation (`pipeline/semantic_store.summarise_with_llm()`). Both get their provider from `agents/llm/factory.get_llm_provider(settings)`, which dispatches to `AnthropicProvider` (default, `LLM_PROVIDER=anthropic`) or `OpenAIProvider` (`LLM_PROVIDER=openai`), both implementing the same `LLMProvider` protocol (`chat()` returning a normalized `LLMTurn`). `AnthropicProvider` converts the OpenAI-format tool schema to Anthropic's format internally, so callers stay provider-agnostic.
 
-**Why an abstraction layer:** swapping the triage model to a different vendor used to mean touching 8+ files. Now it's one env var (`LLM_PROVIDER`), plus, for an entirely new provider, one new file and one line in `factory.py`.
+**Why an abstraction layer:** swapping the triage model to a different vendor used to mean touching 8+ files. Now it's one env var (`LLM_PROVIDER`), plus, for an entirely new provider, one new file and one line in `factory.py`. It also closes a real gap: `summarise_with_llm()` used to call the raw OpenAI client directly with `model=settings.LLM_MODEL`, which under the default `LLM_PROVIDER=anthropic` config meant passing a Claude model string to the OpenAI API. That call silently failed every time and fell back to the count-based summary (Rule 10 masked it, so nothing crashed, but semantic summaries were never actually LLM-written under default settings). Routing it through the same `get_llm_provider()` call as triage fixed that.
 
 ### OpenAI (direct SDK, unconditional)
 
-Two integrations stay on the OpenAI SDK directly, regardless of `LLM_PROVIDER`:
-1. **Embeddings** (`text-embedding-3-small`), for duplicate detection and episode retrieval. Anthropic has no embeddings API, so this can't move.
-2. **Semantic pattern summarisation** (`pipeline/semantic_store.py`'s `summarise_with_llm()`), which sends extracted count-based patterns to GPT-4o for a natural-language summary. Not yet migrated to the provider abstraction, `triage_agent.py` was the only file targeted for Phase 8.
-
-Both use the synchronous `openai.OpenAI` client wrapped in `asyncio.to_thread()`.
+**Embeddings** (`text-embedding-3-small`), for duplicate detection and episode retrieval, stay on the OpenAI SDK directly regardless of `LLM_PROVIDER`. Anthropic has no embeddings API, so this can't move. Uses the synchronous `openai.OpenAI` client wrapped in `asyncio.to_thread()`.
 
 **Why `asyncio.to_thread()`:** The OpenAI Python SDK is synchronous. Calling it directly in an `async def` would block the event loop, preventing concurrent Slack/Jira calls. `asyncio.to_thread()` offloads the blocking call to a thread pool without changing the calling code.
 
@@ -260,10 +261,10 @@ All configuration comes from `config/.env` via `python-dotenv`. The `Settings` c
 
 ## Error Handling: The Priority Rules
 
-The system has 11 priority rules (see `CLAUDE.md`) that govern every failure mode. The most important ones for understanding the system's behaviour:
+The system has 11 priority rules (see `CLAUDE.md`) that govern every failure mode. Selected rules only, the ones most important for understanding the system's behaviour, numbers match CLAUDE.md's full list so they stay cross-referenceable. Skipped here: Rule 3 (confidence 0.65-0.90 routes to a flagged ticket, covered by the confidence-routing table above), Rule 7 (duplicate reporters, same mechanism as Rule 4), Rule 8 (quality-metric cold start, no alert until enough reactions), Rule 9 (a missing Slack timestamp just excludes that post from reaction tracking, not a failure).
 
 - **Rule 1**: If Jira is unavailable, post to Slack and continue. Never fail silently.
-- **Rule 2**: If a message is vague, create a ticket with what's available and post a clarification prompt. Never block.
+- **Rule 2**: If a message is vague, ask for the missing details instead of guessing. No ticket is created for an Unclear message, the agent blocks on missing information by design rather than filing a low-quality one.
 - **Rule 4**: If a duplicate is detected, post the existing ticket link and ask the human to confirm. Never silently skip.
 - **Rule 5**: If Slack MCP fails mid-run, continue processing all remaining blocks and report errors at the end.
 - **Rule 6**: If OpenAI is unavailable, post the error to Slack and tell the team to triage manually.
@@ -308,9 +309,3 @@ Following the SDLC in `CLAUDE.md`:
 6. **`/audit`**: Verify unit tests, integration tests, and E2E against real services.
 7. **`/kaizen`**: Clean up: dead code, stale comments, type drift, debt logging.
 8. **`/closeout`**: Update `LEARNINGS.md`, `PROJECT_HISTORY.md`, `PROJECT_ROADMAP.md`, `CLAUDE.md`, commit.
-
----
-
-## What's Next
-
-The next phase is **Phase 10, Event-Driven Trigger (Slack Socket Mode)**: replacing the polling/scheduled-run model with a persistent WebSocket connection so the agent reacts to Slack messages in real time instead of on a fixed interval. See `PROJECT_ROADMAP.md` for the full user stories.

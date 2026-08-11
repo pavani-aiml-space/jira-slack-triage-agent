@@ -94,7 +94,7 @@ The agent has four memory types. Two already exist; two will be built in Phase 6
 
 | Type | What it stores | Implemented as | Status |
 |---|---|---|---|
-| **Working** | Live LLM `messages` list for one block | `messages` list in `_run_llm_loop()` | ✅ exists |
+| **Working** | Live LLM `messages` list for one block | `messages` list in `_classify_block()` | ✅ exists |
 | **Procedural** | Classification rules, when to ask for clarification | System prompt in `triage_agent.py` | ✅ exists |
 | **Episodic** | Specific past decisions: message → ticket key, type, priority, confidence | `memory/episodic_store.py` + `episodic` table in `agent_memory.db` | Phase 6 |
 | **Semantic** | Patterns extracted from many episodes: "login → Bug/High 87% of cases" | `memory/semantic_store.py` + `semantic` table in `agent_memory.db` | Phase 6 |
@@ -126,7 +126,13 @@ tools=[CREATE_JIRA_TICKET_SCHEMA, POST_SLACK_MESSAGE_SCHEMA, ASK_FOR_CLARIFICATI
 - Location: `tests/unit/` (mocked) and `tests/integration/` (real MCP, read-only)
 - Run with: `pytest tests/unit/ -v` or `pytest -v` for the full suite
 - Async tests need `@pytest.mark.asyncio` (requires `pytest-asyncio` installed)
-- When mocking tools stored in `TOOL_EXECUTORS`, use `patch.dict(triage_agent_module.TOOL_EXECUTORS, {...})` — `patch("module.fn")` does not update dict-bound references
+- `_execute_decisions()` calls `create_jira_ticket`, `ask_for_clarification`, `post_slack_message` directly, mock each at its own import site, not through a dict
+
+---
+
+## Writing Style
+
+Do not use em dashes (—) in any documentation, README, architecture doc, plan, or code comment in this repository. Use a period, comma, colon, semicolon, or parentheses instead, whichever fits the sentence.
 
 ---
 
@@ -138,7 +144,6 @@ tools=[CREATE_JIRA_TICKET_SCHEMA, POST_SLACK_MESSAGE_SCHEMA, ASK_FOR_CLARIFICATI
 | `CONFIDENCE_ASK_HUMAN` | 0.65 | Below this → agent asks for clarification |
 | `CONTEXT_WINDOW_MINUTES` | 5 | Group messages within this time window |
 | `MAX_MESSAGES_TO_FETCH` | 20 | How many recent Slack messages to read |
-| `MAX_AGENT_ITERATIONS` | 10 | Max tool-calling loops per conversation block |
 
 ---
 
@@ -229,7 +234,7 @@ List the core files any new developer or workflow step should know about:
 - **LLM Provider** — patch `agents.triage.triage_agent._provider`; set `mock_provider.chat = AsyncMock(return_value=LLMTurn(...))` — do NOT patch `_client` (removed in Phase 8)
 - **LLMProviderError** — use `LLMProviderError("msg")` as `side_effect` for Rule 6 tests (replaces `openai.APIConnectionError`)
 - **OpenAI Embeddings** — `pipeline.duplicate_detector._embed_client` (patch at `pipeline.duplicate_detector._embed_client`)
-- **TOOL_EXECUTORS dict** — use `patch.dict(triage_agent_module.TOOL_EXECUTORS, {...})` not `patch("triage_agent.fn")`
+- **`_execute_decisions()` dispatch** — no dict lookup anymore; it calls `create_jira_ticket`, `ask_for_clarification`, `post_slack_message` directly, so mock each at its `agents.triage.triage_agent.<name>` import site like any other direct-function mock
 - **Phase 4 run() deps** — `fetch_open_tickets`, `load_embedding_cache`, `build_embedding_cache`, `embed_texts`, `find_duplicate`, `add_ticket_to_cache` — all added to `patch_run_deps()` helper in `tests/unit/test_triage_agent.py`
 - **Phase 5 eval** — `pipeline.eval_runner.run_eval_step` (patch as `run_triage.run_eval_step` for run_triage tests); `pipeline.quality_metrics.load_quality_store`, `save_quality_store`, `add_pending_from_run`, `apply_collected`, `should_alert`; `pipeline.reaction_collector.fetch_reactions_for_pending`; `agents.triage.tools.slack_tools._confirmation_ts_buffer` (clear at test start)
 - **Phase 7 memory** — `pipeline.episode_store.load_episode_store`, `save_episode_store`, `add_episode`, `retrieve_similar`, `format_episode_context`; `pipeline.semantic_store.load_semantic_store`, `save_semantic_store`, `extract_count_patterns`, `summarise_with_llm`, `build_semantic_injection`; `pipeline.memory_runner.pre_run`, `post_run`; patch `run_triage.memory_runner.pre_run` / `post_run` for run_triage tests. Do NOT mock `add_episode` (pure list-append, no I/O) — let it run.
@@ -315,8 +320,8 @@ python run_triage.py
 2. Runs Phase 5 eval pre-step: collects Slack reactions from prior runs, computes quality metrics, alerts if rate below threshold
 3. Reads last `MAX_MESSAGES_TO_FETCH` messages from `SLACK_CHANNEL_ID`
 4. Groups them into conversation blocks by `CONTEXT_WINDOW_MINUTES`
-5. For each block: runs duplicate gate, then GPT-4o tool-calling loop with memory context injected
-6. GPT-4o creates Jira tickets and posts confirmations to Slack
+5. For each block: runs duplicate gate, then one structured LLM call (Claude by default) with memory context injected, returning a list of decisions
+6. Deterministic code executes each decision, creates Jira tickets and posts confirmations to Slack, no further model involvement
 7. Runs Phase 5 eval post-step: registers new confirmation posts for reaction polling next run; if `ENABLE_LLM_JUDGE=true`, runs LLM-as-Judge on each ticket created and appends scores to `memory/judge_store.json`
 8. `memory_runner.post_run(run_log)` — writes new episodes, extracts/summarises semantic patterns when threshold reached
 
