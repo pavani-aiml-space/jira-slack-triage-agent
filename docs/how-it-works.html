@@ -1,0 +1,283 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>How JiraSlack works</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --paper: #14101f; --paper-raised: #1e1830; --ink: #ece8f7; --ink-secondary: #b3a9cf;
+    --ink-muted: #83789f; --line: #322a49; --line-soft: #251f38; --brand: #a985ff;
+    --brand-ink: #cbb4ff; --brand-bg: #241a3d; --brand-2: #ff8dc1; --warn: #e0ac52; --warn-ink: #f6ddb0;
+    --warn-bg: #3a2c14; --ok: #6fbf93; --ok-ink: #cdead9; --ok-bg: #1e3327;
+    --shadow: 0 1px 2px rgba(0,0,0,0.2), 0 6px 20px rgba(0,0,0,0.28);
+    --shadow-lift: 0 2px 4px rgba(0,0,0,0.25), 0 12px 28px rgba(169,133,255,0.22);
+    --font-display: Charter, Georgia, Cambria, "Times New Roman", serif;
+    --font-body: -apple-system, BlinkMacSystemFont, "Segoe UI", Helvetica, Arial, sans-serif;
+    --font-mono: ui-monospace, "SF Mono", "Cascadia Code", "Roboto Mono", monospace;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body { background: var(--paper); color: var(--ink); font-family: var(--font-body); line-height: 1.55; font-size: 15.5px; margin: 0; }
+  .sheet { max-width: 780px; margin: 0 auto; padding: 2.5rem 1.5rem 4rem; }
+  .hero { position: relative; margin: -0.4rem -1.5rem 0.6rem; padding: 1.8rem 1.5rem 1.9rem; border-radius: 16px; overflow: hidden;
+    background: radial-gradient(120% 160% at 12% -10%, var(--brand-bg) 0%, transparent 55%), var(--paper); }
+  .hero::before { content: ""; position: absolute; top: -40%; right: -18%; width: 260px; height: 260px; border-radius: 50%;
+    background: radial-gradient(closest-side, var(--brand-2) 0%, transparent 72%); opacity: 0.28; filter: blur(2px); pointer-events: none; }
+  .eyebrow { position: relative; display: inline-flex; align-items: center; gap: 0.4em; font-family: var(--font-mono); font-size: 11.5px; letter-spacing: 0.12em; text-transform: uppercase; color: var(--brand-ink); font-weight: 600; }
+  .eyebrow::before { content: ""; width: 6px; height: 6px; border-radius: 50%; background: var(--brand); box-shadow: 0 0 0 3px var(--brand-bg); }
+  h1 { position: relative; font-family: var(--font-display); font-weight: 400; font-size: clamp(30px, 6vw, 40px); line-height: 1.1; margin: 0.35em 0 0.4em;
+    background: linear-gradient(100deg, var(--ink) 30%, var(--brand-ink) 65%, var(--brand-2) 100%);
+    -webkit-background-clip: text; background-clip: text; color: transparent; }
+  .thesis { position: relative; font-size: 16px; color: var(--ink-secondary); max-width: 62ch; margin: 0; }
+  .thesis q, .thesis .quote { color: var(--ink); font-style: italic; }
+  .thesis + .thesis { margin-top: 0.7rem; }
+  p { max-width: 68ch; color: var(--ink-secondary); margin: 0.5rem 0; }
+  a { color: var(--brand-ink); }
+  code { font-family: var(--font-mono); font-size: 0.92em; }
+  ul.tight { padding-left: 1.1rem; margin: 0.4rem 0; }
+  ul.tight li { color: var(--ink-secondary); margin-bottom: 0.3rem; }
+  .stamp { display: inline-block; font-family: var(--font-mono); font-size: 10px; letter-spacing: 0.04em; text-transform: uppercase; padding: 0.18em 0.5em; border: 1px solid currentColor; border-radius: 3px; white-space: nowrap; }
+  .stamp.fact { color: var(--ok-ink); background: var(--ok-bg); border-color: var(--ok); }
+  .stamp.ai { color: var(--brand-ink); background: var(--brand-bg); border-color: var(--brand); }
+  .stamp.warn { color: var(--warn-ink); background: var(--warn-bg); border-color: var(--warn); }
+  .pipeline { display: flex; flex-wrap: wrap; align-items: stretch; gap: 0.5rem; margin: 0.8rem 0; }
+  .pipeline-step { flex: 1 1 140px; padding: 0.55rem 0.65rem 0.55rem 0.55rem; background: var(--paper-raised); border: 1px solid var(--line); border-left: 3px solid var(--brand);
+    border-radius: 7px; font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-secondary); box-shadow: var(--shadow); transition: transform 0.15s ease, box-shadow 0.15s ease; }
+  .pipeline-step:hover { transform: translateY(-2px); box-shadow: var(--shadow-lift); }
+  .pipeline-step .num { display: inline-flex; align-items: center; justify-content: center; min-width: 18px; height: 18px; padding: 0 4px; margin-right: 0.3em;
+    background: var(--brand); color: #fff; border-radius: 5px; font-weight: 700; font-size: 10px; }
+  .pipeline-arrow { display: flex; align-items: center; color: var(--brand); font-size: 15px; font-weight: 700; }
+  table { width: 100%; border-collapse: collapse; margin: 0.6rem 0 1.2rem; font-size: 13.5px; }
+  th, td { text-align: left; padding: 0.45rem 0.6rem; border-bottom: 1px solid var(--line-soft); vertical-align: top; }
+  th { font-family: var(--font-mono); font-size: 10px; text-transform: uppercase; letter-spacing: 0.04em; color: var(--ink-muted); font-weight: 500; }
+  tr.group-head td { padding-top: 0.9rem; font-weight: 600; color: var(--ink); border-bottom: none; font-size: 11px; text-transform: uppercase; letter-spacing: 0.04em; }
+  .table-scroll { overflow-x: auto; }
+  pre { background: var(--paper-raised); border: 1px solid var(--line); border-radius: 4px; padding: 0.75rem 0.9rem; overflow-x: auto; font-size: 12.5px; margin: 0.6rem 0; }
+  .footer { margin-top: 3rem; padding-top: 1.2rem; border-top: 1px solid var(--line); font-family: var(--font-mono); font-size: 11.5px; color: var(--ink-muted); }
+
+  details.block { border-top: 1px solid var(--line); }
+  details.block:first-of-type { border-top: none; }
+  details.block > summary { cursor: pointer; list-style: none; padding: 1.5rem 0.8rem; margin: 0 -0.8rem; border-radius: 10px;
+    display: flex; align-items: center; justify-content: space-between; gap: 0.8rem; transition: background 0.15s ease, box-shadow 0.15s ease; border-left: 3px solid transparent; }
+  details.block > summary::-webkit-details-marker { display: none; }
+  details.block > summary::marker { content: ""; }
+  details.block > summary:hover { background: var(--brand-bg); border-left-color: var(--brand); }
+  details.block[open] > summary { background: var(--brand-bg); border-left-color: var(--brand); box-shadow: var(--shadow); }
+  details.block > summary .label { font-family: var(--font-body); font-weight: 700; font-size: 12.5px; text-transform: uppercase; letter-spacing: 0.06em; color: var(--ink); transition: color 0.15s ease; }
+  details.block > summary:hover .label, details.block[open] > summary .label { color: var(--brand-ink); }
+  details.block > summary .chevron { font-family: var(--font-mono); color: var(--brand); font-size: 16px; font-weight: 700; transition: transform 0.15s ease; flex-shrink: 0; }
+  details.block[open] > summary .chevron { transform: rotate(90deg); }
+  details.block > summary .hint { font-family: var(--font-mono); font-size: 10.5px; color: var(--ink-muted); text-transform: none; letter-spacing: 0; margin-left: auto; margin-right: 0.6rem; }
+  details.block > .block-body { padding: 0.4rem 0.2rem 2rem; }
+
+  details.subblock { margin: 1.1rem 0; border: 1px solid var(--line); border-radius: 9px; background: var(--paper-raised); box-shadow: var(--shadow); transition: box-shadow 0.15s ease, transform 0.15s ease; }
+  details.subblock:hover { box-shadow: var(--shadow-lift); transform: translateY(-1px); }
+  details.subblock[open] { border-color: var(--brand); }
+  details.subblock > summary { cursor: pointer; list-style: none; padding: 0.75rem 1rem; margin: 0; display: flex; align-items: center; justify-content: space-between; gap: 0.6rem; font-weight: 600; color: var(--ink); font-size: 14.5px; }
+  details.subblock > summary::-webkit-details-marker { display: none; }
+  details.subblock > summary::marker { content: ""; }
+  details.subblock > summary:hover { color: var(--brand-ink); }
+  details.subblock > summary .chevron { font-family: var(--font-mono); color: var(--brand); font-size: 13px; font-weight: 700; transition: transform 0.15s ease; flex-shrink: 0; }
+  details.subblock[open] > summary .chevron { transform: rotate(90deg); }
+  details.subblock > .subblock-body { padding: 0 1rem 1rem; }
+  details.subblock + details.subblock { margin-top: 0.7rem; }
+</style>
+</head>
+<body>
+<div class="sheet">
+
+  <div class="hero">
+    <span class="eyebrow">How it works</span>
+    <h1>JiraSlack</h1>
+    <p class="thesis">Team channels are where the real conversation happens during a release. "Oh, this isn't working?" "We need to build the export feature before launch."</p>
+    <p class="thesis">That message is exactly the moment the issue should turn into a ticket, and exactly the moment it usually doesn't, because filing one means stopping the conversation to go do something else, so it depends on someone remembering.</p>
+    <p class="thesis">JiraSlack reads the channel, classifies each message with an LLM, files a structured ticket, and asks a person first when it isn't confident enough to act alone.</p>
+  </div>
+
+  <details class="block">
+    <summary><span class="label">Requirements &amp; how we measure them</span><span class="chevron">&rsaquo;</span></summary>
+    <div class="block-body">
+    <div class="table-scroll">
+    <table>
+      <tr><th>Requirement</th><th>Why it matters</th><th>Metric</th><th>How it's calculated</th><th>Status</th></tr>
+      <tr class="group-head"><td colspan="5">Functional</td></tr>
+      <tr><td>Produce a useful ticket</td><td>A vague ticket still costs someone time to clarify.</td><td>Ticket Usefulness Score (judge vs. source text)</td><td>LLM judge scores type fit, priority fit, title quality, and description completeness, 1-5 each, given the Slack text and the generated ticket.</td><td><span class="stamp fact">Verified</span> SCRUM-3 example</td></tr>
+      <tr><td>Escalate instead of guessing</td><td>A wrong auto-filed ticket erodes trust.</td><td>Escalation Precision</td><td>Would be: share of escalated proposals a human affirmed as-is vs. corrected. Each resolution is already recorded per item, just not yet aggregated into a rate.</td><td><span class="stamp ai">Future</span></td></tr>
+      <tr><td>Classify type &amp; priority</td><td>Misrouted tickets skew the backlog.</td><td>Classification Accuracy (vs. golden dataset)</td><td>Diff the agent's type/priority against human-labeled correct_type/correct_priority in a 22-example golden set, the same fixtures already used to calibrate the judge.</td><td><span class="stamp fact">Harness built</span></td></tr>
+      <tr><td>Catch duplicates</td><td>Duplicate tickets waste re-investigation.</td><td>Duplicate Catch Rate</td><td>Cosine similarity between the block's embedding and cached ticket-summary embeddings, caught above the 0.85 threshold.</td><td><span class="stamp warn">97.43%, n=1</span></td></tr>
+      <tr class="group-head"><td colspan="5">Non-functional</td></tr>
+      <tr><td>Availability</td><td>Silent failure means nobody intervenes.</td><td>Silent Failure Rate</td><td>Every Jira, Slack, and LLM outage path is coded to post to Slack before it can fail silently, walked against the E2E checklist, not a sampled percentage.</td><td><span class="stamp fact">Addressed</span> Jira, Slack, and LLM outages each post to Slack, never fail silently</td></tr>
+      <tr><td>Faithfulness</td><td>An invented detail gets acted on as fact.</td><td>Hallucination Rate</td><td>Proxied by the judge's description score, does the description match what the Slack text actually said, not a dedicated fact-check pass.</td><td><span class="stamp warn">Partial</span></td></tr>
+      <tr><td>Idempotency</td><td>Re-running shouldn't duplicate work.</td><td>Duplicate-on-Rerun Rate</td><td>Every filed ticket's embedding is cached to disk, so reprocessing the same message later trips the same duplicate gate as step 02.</td><td><span class="stamp fact">Addressed</span></td></tr>
+      <tr><td>Precision vs. recall</td><td>Wrong in either direction has a cost.</td><td>FP / FN Rate</td><td>Bounded by the 3-tier confidence routing (auto-act only above 0.90, nothing silently dropped below 0.65), not yet tracked as a measured rate.</td><td><span class="stamp fact">By design</span> confidence bands</td></tr>
+      <tr><td>Data sensitivity</td><td>Sensitive Slack detail could land in Jira.</td><td>Sensitive-Data Leak Rate</td><td>Would be: scan ticket content for sensitive Slack detail before filing. No scan exists yet.</td><td><span class="stamp ai">Future</span></td></tr>
+      <tr><td>Auditability</td><td>Unattended decisions must be reconstructable.</td><td>Run Log Completeness</td><td>Every attempted block gets one recorded entry in the run log, including errors, diffable against blocks_processed.</td><td><span class="stamp fact">Addressed</span></td></tr>
+      <tr><td>Timeliness</td><td>A bug unfiled for hours defeats the purpose.</td><td>Time to Ticket</td><td>Would be: elapsed time from Slack message to filed ticket. Currently bounded by the polling interval between runs, not measured directly.</td><td><span class="stamp ai">Future</span> polling, not live</td></tr>
+      <tr><td>Cost</td><td>Must stay cheap at real volume.</td><td>Cost per Ticket</td><td>Prompt + completion tokens recorded per block, one LLM call now, not up to ten, times the provider's per-token rate.</td><td><span class="stamp fact">Addressed</span> ~80% skip memory</td></tr>
+    </table>
+    </div>
+    </div>
+  </details>
+
+  <details class="block">
+    <summary><span class="label">Solution: end-to-end flow</span><span class="chevron">&rsaquo;</span></summary>
+    <div class="block-body">
+    <div class="pipeline">
+      <div class="pipeline-step"><span class="num">01</span> Fetch + group</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step"><span class="num">02</span> Duplicate gate</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step"><span class="num">03</span> Classify</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step"><span class="num">04</span> Route confidence</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step"><span class="num">05</span> Act / flag / escalate</div>
+      <div class="pipeline-arrow">&rarr;</div>
+      <div class="pipeline-step"><span class="num">06</span> Confirm to Slack</div>
+    </div>
+    <div class="table-scroll">
+    <table>
+      <tr><th>Step</th><th>What happens</th></tr>
+      <tr><td>01 Fetch + group</td><td>Slack messages and open Jira tickets are fetched in parallel, messages within a 5-minute window are grouped into one "block", the unit everything below operates on.</td></tr>
+      <tr><td>02 Duplicate gate</td><td>The block is embedded once and compared against cached ticket embeddings. Above 0.85 similarity, it's flagged as a duplicate and never reaches the model.</td></tr>
+      <tr><td>03 Classify</td><td>The only agentic step, and only one call, no loop. The LLM reads the block and returns a list of decisions (0 or more), one per actionable item, each with a type, priority, and confidence. Everything after that is deterministic code.</td></tr>
+      <tr><td>04 Route confidence</td><td>The model's own confidence score is checked in plain code against two thresholds: auto-act, flag for review, or escalate.</td></tr>
+      <tr><td>05 Act / flag / escalate</td><td>The routed decision executes: file directly, file with a review label, or post a proposal to Slack for a human to approve.</td></tr>
+      <tr><td>06 Confirm to Slack</td><td>Every path ends with a message in the channel, a ticket link, a question, or a proposal, so nothing resolves silently.</td></tr>
+    </table>
+    </div>
+    <p>This is the flow for one Slack block, not the system's architecture (components, storage, provider abstraction). For that: <a href="ARCHITECTURE.md">ARCHITECTURE.md</a>.</p>
+    </div>
+  </details>
+
+  <details class="block">
+    <summary><span class="label">Key trade-offs</span><span class="chevron">&rsaquo;</span></summary>
+    <div class="block-body">
+    <ul class="tight">
+      <li><strong>Duplicate detection:</strong> dense embedding similarity, not keyword match (misses paraphrases) or a hybrid dense+sparse setup like <a href="https://github.com/pavani-aiml-space/continuum-rag">Continuum</a> (added complexity this corpus doesn't need yet).</li>
+      <li><strong>Ticket quality:</strong> a cross-family, calibrated LLM judge (OpenAI judging Claude's output), not BLEU/ROUGE, since there's no single correct ticket phrasing to match against.</li>
+    </ul>
+    </div>
+  </details>
+
+  <details class="block">
+    <summary><span class="label">My learnings</span><span class="chevron">&rsaquo;</span></summary>
+    <div class="block-body">
+
+    <details class="subblock">
+      <summary>Agent vs. deterministic code<span class="chevron">&rsaquo;</span></summary>
+      <div class="subblock-body">
+      <ul class="tight">
+        <li>Started out wanting to build the entire flow as agentic, the goal was learning how tool-calling agents actually work, that was the exciting part. First version let the model decide as much as it could.</li>
+        <li>Then stepped back: what does this look like running unattended, not as a learning exercise?
+          <ul class="tight">
+            <li><strong>Latency</strong>, every LLM call adds round-trip time; a loop can make several per message.</li>
+            <li><strong>Cost</strong>, scales with volume, not with how interesting the problem is.</li>
+            <li><strong>Reliability</strong>, a model's decision can vary run to run on the same input.</li>
+            <li><strong>Debuggability</strong>, tracing why a loop chose a sequence of tools is harder than reading fixed branches.</li>
+          </ul>
+        </li>
+        <li>Landed on the real discipline: the first question isn't "can an agent do this," it's "does this need one, or would a deterministic workflow get the same result cheaper, faster, more predictably."</li>
+        <li>Here, that meant an agentic core (classification) wrapped in deterministic guardrails (duplicate gating, confidence routing), not agent judgment applied everywhere.</li>
+      </ul>
+      </div>
+    </details>
+
+    <details class="subblock">
+      <summary>Eval techniques<span class="chevron">&rsaquo;</span></summary>
+      <div class="subblock-body">
+      <ul class="tight">
+        <li>Started wanting to just eyeball a few generated tickets and trust the model's own confidence at face value, fastest way to feel like it's working.</li>
+        <li>Then stepped back: that's not objective, doesn't scale, and different decisions need different proof.
+          <ul class="tight">
+            <li><strong>Classification</strong> (type, priority) has one correct answer, eyeballing wastes the fact that ground truth exists.</li>
+            <li><strong>Ticket quality</strong> (title, description) has no single correct phrasing, exact-match tooling would be wrong here.</li>
+            <li><strong>Production behavior</strong> drifts over time, a one-time offline check doesn't catch that.</li>
+          </ul>
+        </li>
+        <li>Landed on matching the eval method to the decision, not one technique for everything:
+          <ul class="tight">
+            <li><strong>Golden dataset + direct comparison</strong> where ground truth exists (classification).</li>
+            <li><strong>LLM-as-judge</strong> where it doesn't (ticket quality), but only trustworthy once cross-family and calibrated against known-good/known-wrong cases first, an uncalibrated judge is just an unverified opinion.</li>
+            <li><strong>Human verification</strong> (Slack thumbs up/down) for a live, continuous signal that catches drift a static eval set can't, cheap per data point, feeds a rolling metric instead of requiring a full review.</li>
+          </ul>
+        </li>
+      </ul>
+      </div>
+    </details>
+
+    <details class="subblock">
+      <summary>How do we curate the memory?<span class="chevron">&rsaquo;</span></summary>
+      <div class="subblock-body">
+      <ul class="tight">
+        <li>Curation starts before retrieval, at write time. Only blocks that end in a filed ticket become episodes. Duplicates, escalations, and clarification requests never get remembered, so noise never enters the store in the first place.</li>
+        <li>First retrieval approach: pre-inject the most similar past tickets into every single block. Simplest to build, most context available every time.</li>
+        <li>Stepped back: that means an embedding lookup and extra tokens on every block, including the ~80% that never needed past context at all. Second approach made that judgment the model's own, a <code>search_memory</code> tool it calls only when it says it's uncertain, cheaper on average, but it's a self-report: unverified, and inconsistent run to run on identical input.</li>
+        <li>Landed on something cheaper and deterministic instead: every block is already embedded once for the duplicate check, so that same vector is reused to score similarity against past episodes too, no second embedding call, no model decision involved. Only injected if the closest match clears a similarity threshold, so identical input always gets identical treatment, and checking costs nothing extra.</li>
+        <li>Relevance isn't the only thing being curated, amount, cost, and freshness all get a deliberate answer too:</li>
+      </ul>
+      <div class="table-scroll">
+      <table>
+        <tr><th>What's curated</th><th>How it's enforced here</th><th>Why</th></tr>
+        <tr><td>Relevance</td><td>Cosine similarity against the block's own embedding, gated by a threshold.</td><td>An unrelated "similar" episode is worse than injecting nothing at all.</td></tr>
+        <tr><td>Amount</td><td>Top 3 matches max, and the semantic summary is capped at 1000 characters.</td><td>More context isn't free, past a point it adds tokens without adding signal.</td></tr>
+        <tr><td>Cost</td><td>Reuses the embedding already computed for the duplicate gate.</td><td>Zero extra API calls spent just to check whether memory is relevant.</td></tr>
+        <tr><td>Freshness</td><td>Episodes pruned oldest-first past 200; the semantic summary is recomputed from whatever's currently stored, not frozen at first write.</td><td>Old precedent should age out as the store turns over, not accumulate forever.</td></tr>
+      </table>
+      </div>
+      <p>That's the episodic and semantic layers. For reference, here's how those two fit alongside the other two standard memory types:</p>
+      <div class="table-scroll">
+      <table>
+        <tr><th>Type</th><th>What it is</th><th>Example here</th><th>When and why it's used</th></tr>
+        <tr><td>Working</td><td>The live message list for one task, gone once it's done.</td><td>The per-block conversation + tool calls, discarded after that block.</td><td>Every multi-turn loop needs it. Why: without it the model can't see its own prior tool calls in the same block, so it couldn't reason across its own steps at all.</td></tr>
+        <tr><td>Procedural</td><td>Fixed rules for how to do the task, baked in, never looked up.</td><td>The system prompt: "Bug: something is broken... Story: a feature request..."</td><td>When behavior should hold constant across every call. Why: baking the rule into the prompt guarantees it applies the same on call 1 and call 10,000, no drift, no dependence on history.</td></tr>
+        <tr><td>Episodic</td><td>Specific past events, retrieved by similarity, gated by a threshold.</td><td>One entry per filed ticket: <code>SCRUM-3</code>, Bug, High, "Fix login crash on empty password". Reuses the block's duplicate-check embedding, no extra call.</td><td>When a specific past case would change this decision, not just correlate with it. Why: reused precedent is reproducible; a self-reported "I'm uncertain" judgment call isn't.</td></tr>
+        <tr><td>Semantic</td><td>General patterns extracted from many episodes.</td><td>"Login-related issues are usually High priority Bugs", injected into the system prompt.</td><td>When many calls would benefit from the same standing insight. Why: computing it once and injecting it everywhere is cheaper than re-deriving the same pattern per call, and more consistent than hoping each call notices it independently.</td></tr>
+      </table>
+      </div>
+      </div>
+    </details>
+
+    <details class="subblock">
+      <summary>Identifying failure points<span class="chevron">&rsaquo;</span></summary>
+      <div class="subblock-body">
+      <ul class="tight">
+        <li>Started by walking the pipeline step by step and asking, at each one, what happens if this goes wrong.</li>
+        <li>Most of these failures don't look dramatic, a misclassified type, a vague description, nothing crashes or throws an error. But that's exactly what makes them dangerous: repeated enough times, they're what actually kills adoption, people quietly stop trusting the tickets and start re-checking everything by hand, which defeats the point of automating it at all.</li>
+        <li>So the discipline was treating every one of these as critical for the design, even though none of them "fail" in the traditional sense, and putting a guardrail behind each before shipping it.</li>
+      </ul>
+      <div class="table-scroll">
+      <table>
+        <tr><th>Failure mode</th><th>Why it's more critical than it looks</th><th>Guardrail</th></tr>
+        <tr><td>Misclassify type</td><td>Doesn't crash anything, just routes wrong, but repeated misrouting is what erodes trust in the automation itself.</td><td>Golden-dataset accuracy harness; low-confidence classifications get flagged or escalated, not auto-filed.</td></tr>
+        <tr><td>Misclassify priority</td><td>A real High-priority bug marked Low doesn't error, it just sits at the bottom of the backlog, a silent failure with no visible symptom.</td><td>Same confidence-banded routing; self-assessed confidence required on every classification.</td></tr>
+        <tr><td>Vague or unhelpful description</td><td>Technically a valid ticket, so it "succeeds," but if engineers can't act on it without re-investigating, the automation adds review work instead of removing it.</td><td>LLM-as-judge Ticket Usefulness Score; escalates to a human question instead of guessing when input is too vague.</td></tr>
+        <tr><td>False duplicate match</td><td>Looks like a small mismatch, but even occasional false positives make people stop trusting the flag and start manually checking every one.</td><td>Never auto-skips, routes every match to human confirmation, a false positive costs a moment's review, not a lost ticket.</td></tr>
+        <tr><td>Missed duplicate</td><td>Doesn't error, just creates an extra ticket, but repeated misses fragment discussion across multiple tickets for the same issue.</td><td>Similarity threshold calibrated for sensitivity; real run caught a true duplicate at 97.43%.</td></tr>
+        <tr><td>Auto-filing on low real confidence</td><td>The most consequential one, one bad autonomous action is remembered longer than many good ones, this is what actually breaks trust in the whole system.</td><td>Confidence-banded routing, nothing auto-files below 0.90, escalates to a human below 0.65.</td></tr>
+        <tr><td>Silent failure on outage</td><td>Not filing anything is bad; not filing anything and nobody knowing is worse, a real bug could go untracked with no trace.</td><td>Priority Rules 1, 5, 6, every outage posts to Slack, never fails silently.</td></tr>
+      </table>
+      </div>
+      </div>
+    </details>
+
+    </div>
+  </details>
+
+  <details class="block">
+    <summary><span class="label">Run it</span><span class="chevron">&rsaquo;</span></summary>
+    <div class="block-body">
+    <p>Claude by default (swappable to OpenAI via one env var); embeddings stay on OpenAI regardless.</p>
+<pre>git clone https://github.com/pavani-aiml-space/jira-slack-triage-agent.git
+cd jira-slack-triage-agent && pip install -r requirements.txt
+cp config/.env.example config/.env   # fill in credentials
+python run_triage.py</pre>
+    </div>
+  </details>
+
+  <div class="footer">JiraSlack</div>
+
+</div>
+</body>
+</html>
