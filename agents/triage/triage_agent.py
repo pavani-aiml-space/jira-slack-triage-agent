@@ -2,22 +2,30 @@
 Triage Agent — LLM-driven orchestrator.
 
 Execution order:
-  1. IMPORTS & CONFIG     — load everything needed
-  2. SYSTEM PROMPT        — rules given to the LLM provider
-  3. ALL_TOOLS            — schemas the LLM provider can call
-  4. TOOL_EXECUTORS       — map of name → Python function
-  5. _execute_tool()      — runs whichever tool the LLM chose
-  6. _run_llm_loop()      — the LLM tool-calling loop for one block
-  7. run()                — main entry point: reads Slack → groups → loops
+  1. IMPORTS & CONFIG        — load everything needed
+  2. SYSTEM PROMPT           — rules given to the LLM provider
+  3. SUBMIT_DECISIONS_SCHEMA — the one tool schema the LLM provider can call
+  4. _classify_block()       — one structured LLM call per block, no loop
+  5. _execute_decisions()    — deterministic dispatch, no model involved
+  6. run()                   — main entry point: reads Slack → groups → loops
 
 LLM provider is the brain. This file is the hands.
 Provider is configured via settings.LLM_PROVIDER — default "anthropic" (Claude).
 Set LLM_PROVIDER=openai and LLM_MODEL=gpt-4o to use OpenAI instead.
 
-Memory strategy (Option A — lazy retrieval):
+Classification strategy (one call, not a loop):
+  - The LLM is offered exactly one tool, submit_triage_decisions, and returns
+    a list of decisions (0 or more) for the block in a single round trip.
+  - Everything after that is plain code: which tool to call for which
+    decision, whether to post a Slack confirmation, how to route by
+    confidence. None of it is left to further model judgment.
+
+Memory strategy (deterministic retrieval):
   - Semantic patterns injected into SYSTEM_PROMPT once per run (small, run-level).
-  - Episodes NOT pre-injected per block. Instead, the LLM calls search_memory()
-    when uncertain. Zero episode tokens for clear-cut blocks (~80% of cases).
+  - Episodes are retrieved per block by reusing the embedding already computed
+    for the duplicate gate — no extra embedding call, no model judgment call.
+    Only injected if the closest match clears EPISODE_SIMILARITY_THRESHOLD.
+    Zero episode tokens for blocks with no close match (~80% of cases).
 """
 
 # ── 1. IMPORTS & CONFIG ───────────────────────────────────────────────────────
@@ -40,17 +48,14 @@ from pipeline.duplicate_detector import (
     find_duplicate,
     add_ticket_to_cache,
 )
+from pipeline.episode_store import retrieve_similar, format_episode_context
 
-from agents.triage.tools.jira_tools import CREATE_JIRA_TICKET_SCHEMA, create_jira_ticket
+from agents.triage.tools.jira_tools import create_jira_ticket
 from agents.triage.tools.slack_tools import (
-    POST_SLACK_MESSAGE_SCHEMA,
-    ASK_FOR_CLARIFICATION_SCHEMA,
     post_slack_message,
     ask_for_clarification,
     drain_confirmation_ts,
 )
-import agents.triage.tools.memory_tools as memory_tools
-from agents.triage.tools.memory_tools import SEARCH_MEMORY_SCHEMA, search_memory
 from pipeline.memory_runner import MemoryContext
 from pipeline.pending_confirmation_store import load_pending_store, save_pending_store
 from pipeline.confirmation_resolver import resolve_pending_confirmations
@@ -62,32 +67,19 @@ _provider: LLMProvider = get_llm_provider(settings)
 SYSTEM_PROMPT = """
 You are a software triage agent monitoring a Slack channel for incoming messages.
 
-Your job is to identify whether each conversation block contains an actionable software issue or request, then take exactly one appropriate action.
+Read the full conversation block, including replies and context, and decide what actionable items it contains. Most blocks contain exactly one. Some contain none (casual discussion, a question already answered). A few contain more than one distinct issue — if a message reports several unrelated problems, that's several decisions, not one.
 
-Classification options:
-- Bug: Something is broken, failing, degraded, producing incorrect results, or behaving unexpectedly.
-- Story: A user-facing feature request, product enhancement, or new capability.
-- Task: Internal engineering, operational, documentation, cleanup, investigation, or maintenance work.
-- Unclear: Not enough information to create a useful Jira ticket.
-- Duplicate: The issue/request clearly matches an existing or already-created ticket mentioned in the conversation.
+Call submit_triage_decisions exactly once, with one decision per actionable item. Pass an empty list if nothing in this block is actionable.
 
-For each conversation block:
-1. Read the full Slack conversation block, including replies and context.
-2. Decide whether it is a Bug, Story, Task, Unclear, or Duplicate.
-3. If it is Bug, Story, or Task:
-   - Create a Jira ticket using create_jira_ticket.
-   - Include a concise title, clear description, relevant Slack context, expected vs. actual behavior if available, affected users/scope, and priority.
-   - Always include a confidence score (0.0-1.0) — how sure you are about the type, priority, and details. Be honest, not optimistic: a vague or ambiguous report should score low, not 0.9 just because you produced a plausible-looking ticket.
-   - Also include reasoning — one or two sentences on why you classified it this way. This is shown to the team if your confidence is too low to file automatically.
-   - Below a confidence threshold, the ticket will NOT be filed immediately — it will be proposed to the team for confirmation instead, and create_jira_ticket's result will start with "[ESCALATED]". When you see that prefix, do NOT call post_slack_message yourself — the confirmation request has already been posted.
-   - Otherwise, call post_slack_message with the Jira ticket link and a short summary.
-4. If it is Unclear:
-   - Call ask_for_clarification.
-   - Ask only for the missing details needed to create a good ticket.
-   - Then call post_slack_message saying clarification was requested.
-5. If it is Duplicate:
-   - Do not create a Jira ticket.
-   - Call post_slack_message explaining that it appears to be a duplicate and reference the known ticket or reason if available.
+Each decision has an action:
+- create_ticket: the item is a Bug (something broken, failing, degraded, or behaving unexpectedly), a Story (a user-facing feature request or enhancement), or a Task (internal engineering, ops, docs, cleanup, or investigation work).
+- ask_clarification: not enough information to create a useful ticket. Ask only for the missing details needed.
+- duplicate: the issue clearly matches an existing or already-created ticket mentioned in the conversation itself. Reference the known ticket or reason if available.
+
+For each create_ticket decision:
+- Include a concise title, and a clear description (what, steps to reproduce, expected vs. actual behavior if available, affected users/scope), and a priority.
+- Always include a confidence score (0.0-1.0) — how sure you are about the type, priority, and details. Be honest, not optimistic: a vague or ambiguous report should score low, not 0.9 just because you produced a plausible-looking ticket.
+- Also include reasoning — one or two sentences on why you classified it this way. This is shown to the team if confidence is too low to file automatically.
 
 Priority guide:
 - Critical: Production down, all or most users affected, data loss, security issue, payments blocked, or no workaround.
@@ -96,81 +88,109 @@ Priority guide:
 - Low: Cosmetic issue, minor annoyance, affects few users, small enhancement, documentation request.
 
 Rules:
-- Always reply in Slack after taking action.
 - Do not create tickets from casual discussion, questions, jokes, or vague complaints unless there is a clear actionable issue.
 - Do not infer missing technical details beyond what the Slack conversation supports.
-- Prefer asking for clarification over creating a low-quality ticket.
-- If multiple distinct actionable issues are reported, create separate Jira tickets.
-- If one message contains related symptoms of the same root problem, create one ticket.
+- Prefer ask_clarification over creating a low-quality ticket.
+- If multiple distinct actionable issues are reported, submit one create_ticket decision per issue.
+- If one message contains related symptoms of the same root problem, submit one decision.
 - Keep Jira titles short and specific.
-- Include the original Slack message permalink if available.
 
-Memory tool:
-- Call search_memory when uncertain about ticket type, priority, or whether a similar issue has been triaged before.
-- Pass a brief description of the current issue as the query.
-- Do NOT call search_memory for clear, unambiguous bug reports or straightforward feature requests.
+If a "## Similar past decisions" section appears below the Slack message, it was retrieved automatically because this issue closely matches past triage decisions. Use it as precedent, don't ignore it.
 """
 
 
-# ── 3. ALL_TOOLS — schemas OpenAI can call ────────────────────────────────────
-ALL_TOOLS = [
-    CREATE_JIRA_TICKET_SCHEMA,
-    POST_SLACK_MESSAGE_SCHEMA,
-    ASK_FOR_CLARIFICATION_SCHEMA,
-    SEARCH_MEMORY_SCHEMA,
-]
-
-
-# ── 4. TOOL_EXECUTORS — map of tool name → Python function ───────────────────
-TOOL_EXECUTORS = {
-    "create_jira_ticket":    create_jira_ticket,
-    "post_slack_message":    post_slack_message,
-    "ask_for_clarification": ask_for_clarification,
-    "search_memory":         search_memory,
+# ── 3. SUBMIT_DECISIONS_SCHEMA — the one tool the LLM provider can call ──────
+SUBMIT_DECISIONS_SCHEMA = {
+    "type": "function",
+    "function": {
+        "name": "submit_triage_decisions",
+        "description": (
+            "Submit one decision per distinct actionable item found in this "
+            "Slack conversation block. Call this exactly once. Pass an empty "
+            "list if nothing here is actionable."
+        ),
+        "parameters": {
+            "type": "object",
+            "properties": {
+                "decisions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {
+                            "action": {
+                                "type": "string",
+                                "enum": ["create_ticket", "ask_clarification", "duplicate"],
+                                "description": "What this decision does.",
+                            },
+                            "summary": {
+                                "type": "string",
+                                "description": "Short ticket title, max 80 chars, imperative tone e.g. 'Fix login crash on empty password'. Required for create_ticket.",
+                            },
+                            "issue_type": {
+                                "type": "string",
+                                "enum": ["Bug", "Story", "Task"],
+                                "description": "Required for create_ticket.",
+                            },
+                            "priority": {
+                                "type": "string",
+                                "enum": ["Critical", "High", "Medium", "Low"],
+                                "description": "Required for create_ticket.",
+                            },
+                            "description": {
+                                "type": "string",
+                                "description": "Structured description with What, Steps to Reproduce, Expected, Context. Required for create_ticket.",
+                            },
+                            "labels": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Lowercase labels, e.g. ['login', 'regression']. Optional.",
+                            },
+                            "confidence": {
+                                "type": "number",
+                                "description": "Self-assessed confidence 0.0-1.0 in the type, priority, and details. Required for create_ticket.",
+                            },
+                            "reasoning": {
+                                "type": "string",
+                                "description": "One or two sentences on why you classified it this way. Required for create_ticket.",
+                            },
+                            "question": {
+                                "type": "string",
+                                "description": "The clarifying question to ask. Required for ask_clarification.",
+                            },
+                            "note": {
+                                "type": "string",
+                                "description": "Explanation referencing the known ticket or reason. Required for duplicate.",
+                            },
+                        },
+                        "required": ["action"],
+                    },
+                },
+            },
+            "required": ["decisions"],
+        },
+    },
 }
 
 
-# ── 5. _execute_tool() — runs whichever tool OpenAI chose ────────────────────
-async def _execute_tool(tool_name: str, tool_args: dict, block_context: dict | None = None) -> str:
-    """
-    Look up the tool by name and execute it with the given args.
+# ── 4. _classify_block() — one structured call per block, no loop ───────────
 
-    block_context (run_id, block_index, block_snippet) is only threaded through
-    to create_jira_ticket — it's the only tool that needs it, to persist enough
-    context for a low-confidence escalation to be re-classified later if the
-    human replies with a correction (Phase 10).
-    """
-    executor = TOOL_EXECUTORS.get(tool_name)
-    if not executor:
-        return f"Error: unknown tool '{tool_name}'"
-
-    print(f"  → Executing: {tool_name}({tool_args})")
-    if tool_name == "create_jira_ticket":
-        result = await executor(**tool_args, block_context=block_context)
-    else:
-        result = await executor(**tool_args)
-    print(f"  → Result   : {result}")
-    return result
-
-
-# ── 6. _run_llm_loop() — OpenAI tool-calling loop for one block ──────────────
-
-async def _run_llm_loop(
+async def _classify_block(
     block_text: str,
-    block_index: int,
-    block_snippet: str,
     effective_system_prompt: str = "",
-    run_id: str = "",
-) -> BlockResult:
+    episode_context: str = "",
+) -> tuple[list[dict], LlmStats]:
     """
-    Send one conversation block to the LLM provider and loop until it's done.
+    Send one conversation block to the LLM provider and get back a decision list.
 
     effective_system_prompt: SYSTEM_PROMPT + optional semantic injection (set by run()).
-    Episode context is NOT pre-injected here — the LLM calls search_memory() on demand
-    when it needs precedent context (Option A lazy retrieval).
-    Accumulates per-loop stats (iterations, tools called, token totals).
-    Infers action from which tools were called.
-    Returns a BlockResult — never raises (caller handles exceptions).
+    episode_context: pre-formatted "## Similar past decisions" text, already
+    retrieved deterministically by run() via the duplicate gate's block embedding.
+    Appended to the user message only when non-empty — no lookup happens here.
+
+    One call, no loop: the model is offered exactly one tool and must call it
+    once. If it doesn't (a malformed turn), decisions defaults to [] rather
+    than raising — Rule 5, degrade one block, don't crash the whole run.
+    Returns (decisions, LlmStats) — never raises (caller handles exceptions).
     """
     print(f"\n{'─' * 50}")
     print(f"Processing:\n  {block_text.replace(chr(10), chr(10) + '  ')}\n")
@@ -178,119 +198,142 @@ async def _run_llm_loop(
     system_prompt = effective_system_prompt or SYSTEM_PROMPT
 
     user_content = f"Slack message(s):\n\n{block_text}"
+    if episode_context:
+        user_content += f"\n\n{episode_context}"
 
     messages = [
         {"role": "system", "content": system_prompt},
         {"role": "user",   "content": user_content},
     ]
 
-    # Accumulators for LlmStats
-    total_prompt_tokens     = 0
-    total_completion_tokens = 0
-    tools_called_names: list[str] = []
-    jira_tool_args: dict = {}
-    jira_tool_result: str = ""
-    last_finish_reason = "stop"
-    iteration_count = 0
+    turn = await _provider.chat(messages, [SUBMIT_DECISIONS_SCHEMA], system_prompt)
+
+    decisions: list[dict] = []
+    tools_called: list[str] = []
+    if turn.tool_calls:
+        tc = turn.tool_calls[0]
+        tools_called = [tc.name]
+        decisions = tc.args.get("decisions") or []
+
+    print(f"  decisions: {len(decisions)}")
+
+    llm_stats = LlmStats(
+        iterations=1,
+        tools_called=tools_called,
+        finish_reason=turn.finish_reason,
+        prompt_tokens=turn.prompt_tokens,
+        completion_tokens=turn.completion_tokens,
+    )
+    return decisions, llm_stats
+
+
+# ── 5. _execute_decisions() — deterministic dispatch, no model involved ─────
+
+async def _execute_decisions(
+    decisions: list[dict],
+    block_index: int,
+    block_snippet: str,
+    run_id: str,
+    llm_stats: LlmStats,
+) -> list[BlockResult]:
+    """
+    Execute each decision from _classify_block() in plain code.
+
+    Every branch here — routing by confidence, deciding whether to post a
+    Slack confirmation, deciding what BlockResult.action to record — is
+    deterministic, none of it is a model judgment call. llm_stats is
+    attached only to the first result: every decision in this call came
+    from the same one LLM call, so duplicating token counts across results
+    would double-count them if anything ever sums per-block stats.
+
+    Returns one BlockResult per decision, or a single "no_action" result
+    if decisions is empty. Never raises (caller handles exceptions).
+    """
+    if not decisions:
+        return [BlockResult(
+            block_index=block_index, block_snippet=block_snippet,
+            action="no_action", llm=llm_stats,
+        )]
 
     block_context = {"run_id": run_id, "block_index": block_index, "block_snippet": block_snippet}
+    results: list[BlockResult] = []
 
-    for iteration in range(settings.MAX_AGENT_ITERATIONS):
-        iteration_count += 1
-        turn = await _provider.chat(messages, ALL_TOOLS, system_prompt)
-        finish             = turn.finish_reason
-        last_finish_reason = finish
+    for i, decision in enumerate(decisions):
+        stats = llm_stats if i == 0 else None
+        action = decision.get("action")
 
-        total_prompt_tokens     += turn.prompt_tokens
-        total_completion_tokens += turn.completion_tokens
-
-        messages.append(turn.raw_message)
-        print(f"  [iteration {iteration + 1}] finish_reason: {finish}")
-
-        if finish == "stop":
-            if turn.content:
-                print(f"  LLM: {turn.content}")
-            break
-
-        if finish == "tool_calls":
-            for tc in turn.tool_calls:
-                tool_name = tc.name
-                tool_args = tc.args          # already a dict — no json.loads needed
-                tools_called_names.append(tool_name)
-
-                if tool_name == "create_jira_ticket":
-                    jira_tool_args = tool_args
-
-                result = await _execute_tool(tool_name, tool_args, block_context=block_context)
-
-                if tool_name == "create_jira_ticket":
-                    jira_tool_result = result
-
-                messages.append({
-                    "role":         "tool",
-                    "tool_call_id": tc.id,
-                    "content":      result,
-                })
-
-    # ── Infer action ──────────────────────────────────────────────────────────
-    llm_stats = LlmStats(
-        iterations=iteration_count,
-        tools_called=tools_called_names,
-        finish_reason=last_finish_reason,
-        prompt_tokens=total_prompt_tokens,
-        completion_tokens=total_completion_tokens,
-    )
-
-    if "create_jira_ticket" in tools_called_names:
-        if jira_tool_result.startswith("[ESCALATED]"):
-            # Phase 10 — low confidence: no ticket filed yet, proposal posted
-            # to Slack and persisted for a later run to resolve.
-            return BlockResult(
-                block_index=block_index,
-                block_snippet=block_snippet,
-                action="escalated_for_confirmation",
-                ticket_summary=jira_tool_args.get("summary"),
-                ticket_type=jira_tool_args.get("issue_type"),
-                ticket_priority=jira_tool_args.get("priority"),
-                ticket_description=jira_tool_args.get("description"),
-                llm=llm_stats,
+        if action == "create_ticket":
+            jira_result = await create_jira_ticket(
+                summary=decision.get("summary", ""),
+                issue_type=decision.get("issue_type", ""),
+                priority=decision.get("priority", ""),
+                description=decision.get("description", ""),
+                confidence=decision.get("confidence", 0.0),
+                labels=decision.get("labels"),
+                reasoning=decision.get("reasoning", ""),
+                block_context=block_context,
             )
-        key_match = re.search(r"Created (\w+-\d+):", jira_tool_result)
-        ticket_key = key_match.group(1) if key_match else None
-        return BlockResult(
-            block_index=block_index,
-            block_snippet=block_snippet,
-            action="ticket_created",
-            ticket_key=ticket_key,
-            ticket_summary=jira_tool_args.get("summary"),
-            ticket_type=jira_tool_args.get("issue_type"),
-            ticket_priority=jira_tool_args.get("priority"),
-            ticket_description=jira_tool_args.get("description"),
-            llm=llm_stats,
-        )
+            print(f"  → create_ticket: {jira_result}")
 
-    if "ask_for_clarification" in tools_called_names:
-        return BlockResult(
-            block_index=block_index,
-            block_snippet=block_snippet,
-            action="clarification_asked",
-            llm=llm_stats,
-        )
+            if jira_result.startswith("[ESCALATED]"):
+                # Low confidence — escalate_for_confirmation() already posted
+                # the proposal to Slack and persisted it. Nothing more to do.
+                results.append(BlockResult(
+                    block_index=block_index, block_snippet=block_snippet,
+                    action="escalated_for_confirmation",
+                    ticket_summary=decision.get("summary"),
+                    ticket_type=decision.get("issue_type"),
+                    ticket_priority=decision.get("priority"),
+                    ticket_description=decision.get("description"),
+                    llm=stats,
+                ))
+            elif jira_result.startswith("[JIRA_ERROR]") or jira_result.startswith("[ESCALATION_ERROR]"):
+                # Slack was already notified inside the executor.
+                results.append(BlockResult(
+                    block_index=block_index, block_snippet=block_snippet,
+                    action="error", llm=stats,
+                ))
+            else:
+                key_match = re.search(r"Created (\w+-\d+):", jira_result)
+                ticket_key = key_match.group(1) if key_match else None
+                confirmation_ts = None
+                try:
+                    await post_slack_message(f"✅ {jira_result}")
+                    confirmation_ts = drain_confirmation_ts()
+                except Exception as e:
+                    print(f"[triage_agent] confirmation post failed (Rule 5): {e}")
+                results.append(BlockResult(
+                    block_index=block_index, block_snippet=block_snippet,
+                    action="ticket_created", ticket_key=ticket_key,
+                    ticket_summary=decision.get("summary"),
+                    ticket_type=decision.get("issue_type"),
+                    ticket_priority=decision.get("priority"),
+                    ticket_description=decision.get("description"),
+                    confirmation_ts=confirmation_ts, llm=stats,
+                ))
 
-    if "post_slack_message" in tools_called_names:
-        return BlockResult(
-            block_index=block_index,
-            block_snippet=block_snippet,
-            action="clarification_asked",
-            llm=llm_stats,
-        )
+        elif action == "ask_clarification":
+            await ask_for_clarification(decision.get("question", ""))
+            results.append(BlockResult(
+                block_index=block_index, block_snippet=block_snippet,
+                action="clarification_asked", llm=stats,
+            ))
 
-    return BlockResult(
-        block_index=block_index,
-        block_snippet=block_snippet,
-        action="no_action",
-        llm=llm_stats,
-    )
+        elif action == "duplicate":
+            note = decision.get("note") or "This looks like a duplicate of an existing issue."
+            await post_slack_message(f"🔁 {note}")
+            results.append(BlockResult(
+                block_index=block_index, block_snippet=block_snippet,
+                action="duplicate_flagged", ticket_key=decision.get("ticket_key"), llm=stats,
+            ))
+
+        else:
+            results.append(BlockResult(
+                block_index=block_index, block_snippet=block_snippet,
+                action="no_action", llm=stats,
+            ))
+
+    return results
 
 
 # ── 7. run() — main entry point ──────────────────────────────────────────────
@@ -316,7 +359,7 @@ def _print_block_outcome(result: BlockResult, index: int, total: int) -> None:
         print(f"[Block {n}/{total}] {label} {result.ticket_key} "
               f'"{result.ticket_summary}" ({result.ticket_type} · {result.ticket_priority})')
     elif result.action == "duplicate_flagged":
-        print(f"[Block {n}/{total}] {label} {result.ticket_key}")
+        print(f"[Block {n}/{total}] {label} {result.ticket_key or '(referenced in Slack)'}")
     elif result.action == "escalated_for_confirmation":
         print(f"[Block {n}/{total}] {label} "
               f'"{result.ticket_summary}" ({result.ticket_type} · {result.ticket_priority})')
@@ -376,14 +419,15 @@ async def run(
       1. Fetch Slack messages + open Jira tickets in parallel
       2. Build embedding cache (diff-only re-embedding)
       3. Group messages into conversation blocks
-      4. For each block: run duplicate gate, then LLM loop if no match
+      4. For each block: run duplicate gate, then classify + execute deterministically if no match
       5. Post consolidated Slack error report if any blocks failed
       6. Write run log and post Slack summary
 
     memory_context: optional MemoryContext from memory_runner.pre_run().
       - semantic_injection is appended to SYSTEM_PROMPT for the whole run.
-      - episode_store is loaded into memory_tools for on-demand retrieval via search_memory().
-        The LLM calls search_memory() when uncertain — zero episode tokens for clear blocks.
+      - episode_store is searched per block using that block's own embedding
+        (reused from the duplicate gate below) — deterministic, no extra
+        embedding call, no model judgment call. Only injected above threshold.
 
     oldest: optional watermark timestamp (Unix string, e.g. "1714045800.123").
       Only messages with ts > oldest are fetched from Slack.
@@ -410,10 +454,6 @@ async def run(
     effective_system_prompt = SYSTEM_PROMPT
     if memory_context and memory_context.semantic_injection:
         effective_system_prompt = SYSTEM_PROMPT + "\n\n" + memory_context.semantic_injection
-
-    # Load episode store into memory_tools for on-demand retrieval via search_memory()
-    if memory_context:
-        memory_tools.set_episode_store(memory_context.episode_store)
 
     print("=== Triage Agent Starting ===\n")
     print(f"Channel      : {settings.SLACK_CHANNEL_ID}")
@@ -490,31 +530,52 @@ async def run(
                 _print_block_outcome(dup_result, index=i, total=len(blocks))
                 continue
 
-            # ── LLM loop ───────────────────────────────────────────────────
-            result: BlockResult = await _run_llm_loop(
-                block["combined_text"], block_index=i, block_snippet=snippet,
-                effective_system_prompt=effective_system_prompt, run_id=run_id,
+            # ── Episodic retrieval ─────────────────────────────────────────
+            # Reuses block_emb from the duplicate gate above — no extra
+            # embedding call. Deterministic: the same input always gets the
+            # same episode context, gated by a similarity threshold instead
+            # of the model deciding for itself whether to look.
+            episode_context = ""
+            if memory_context and memory_context.episode_store.episodes and block_emb:
+                similar = retrieve_similar(
+                    memory_context.episode_store,
+                    block_emb,
+                    settings.MAX_INJECTED_EPISODES,
+                    threshold=settings.EPISODE_SIMILARITY_THRESHOLD,
+                )
+                episode_context = format_episode_context(similar)
+
+            # ── Classify + execute ───────────────────────────────────────────
+            decisions, llm_stats = await _classify_block(
+                block["combined_text"],
+                effective_system_prompt=effective_system_prompt,
+                episode_context=episode_context,
             )
-            run_log.blocks.append(result)
-            if result.action == "ticket_created":
-                run_log.tickets_created_count += 1
-                # Phase 5: capture confirmation post ts for reaction tracking
-                result.confirmation_ts = drain_confirmation_ts()
-                # Add new ticket to cache for intra-run duplicate prevention
-                if result.ticket_key:
-                    try:
-                        [ticket_emb] = await embed_texts([result.ticket_summary or ""])
-                        cache = add_ticket_to_cache(
-                            cache, result.ticket_key, result.ticket_summary or "",
-                            ticket_emb, settings.EMBEDDING_CACHE_PATH,
-                        )
-                    except Exception as emb_err:
-                        print(f"[duplicate_detector] cache update embed failed (Rule 5): {emb_err}")
-            elif result.action == "clarification_asked":
-                run_log.clarifications_asked_count += 1
-            elif result.action == "escalated_for_confirmation":
-                run_log.escalated_for_confirmation_count += 1
-            _print_block_outcome(result, index=i, total=len(blocks))
+            results = await _execute_decisions(
+                decisions, block_index=i, block_snippet=snippet,
+                run_id=run_id, llm_stats=llm_stats,
+            )
+            run_log.blocks.extend(results)
+            for result in results:
+                if result.action == "ticket_created":
+                    run_log.tickets_created_count += 1
+                    # Add new ticket to cache for intra-run duplicate prevention
+                    if result.ticket_key:
+                        try:
+                            [ticket_emb] = await embed_texts([result.ticket_summary or ""])
+                            cache = add_ticket_to_cache(
+                                cache, result.ticket_key, result.ticket_summary or "",
+                                ticket_emb, settings.EMBEDDING_CACHE_PATH,
+                            )
+                        except Exception as emb_err:
+                            print(f"[duplicate_detector] cache update embed failed (Rule 5): {emb_err}")
+                elif result.action == "clarification_asked":
+                    run_log.clarifications_asked_count += 1
+                elif result.action == "escalated_for_confirmation":
+                    run_log.escalated_for_confirmation_count += 1
+                elif result.action == "duplicate_flagged":
+                    run_log.duplicates_flagged_count += 1
+                _print_block_outcome(result, index=i, total=len(blocks))
 
         except LLMProviderError as e:
             # Rule 6 — LLM provider unavailable: write fatal log, alert Slack, exit

@@ -1,9 +1,9 @@
 """
 Unit tests for pipeline/semantic_store.py
-OpenAI client is mocked — no real API calls.
+The LLM provider is mocked — no real API calls.
 """
 import pytest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 
 # ── Chunk 2.1 — Pattern + SemanticStore + load/save ──────────────────────────
@@ -119,13 +119,14 @@ def test_build_semantic_injection_respects_max_chars():
 @pytest.mark.asyncio
 async def test_summarise_with_llm_updates_summary_text():
     from pipeline.semantic_store import summarise_with_llm, Pattern
-    mock_response = MagicMock()
-    mock_response.choices[0].message.content = "Login and auth issues → Bug, High priority"
+    from agents.llm.base import LLMTurn
     patterns = [
         Pattern("Bug:High", 6, ["login crash", "auth fail"], "Bug:High (6)", "2026-04-29", "count_based")
     ]
-    with patch("pipeline.semantic_store._client") as mock_client:
-        mock_client.chat.completions.create = MagicMock(return_value=mock_response)
+    with patch("pipeline.semantic_store._provider") as mock_provider:
+        mock_provider.chat = AsyncMock(return_value=LLMTurn(
+            finish_reason="stop", content="Login and auth issues → Bug, High priority",
+        ))
         result = await summarise_with_llm(patterns)
     assert result[0].source == "llm_summarised"
     assert "Login" in result[0].summary_text
@@ -137,8 +138,8 @@ async def test_summarise_with_llm_returns_unchanged_on_exception():
     patterns = [
         Pattern("Bug:High", 6, [], "Bug:High (6)", "2026-04-29", "count_based")
     ]
-    with patch("pipeline.semantic_store._client") as mock_client:
-        mock_client.chat.completions.create = MagicMock(side_effect=Exception("API down"))
+    with patch("pipeline.semantic_store._provider") as mock_provider:
+        mock_provider.chat = AsyncMock(side_effect=Exception("API down"))
         result = await summarise_with_llm(patterns)
     # Rule 10 — unchanged on failure
     assert result[0].source == "count_based"

@@ -3,13 +3,14 @@ Unit tests for triage_agent.py
 
 All tool executors and the LLM provider are mocked — no real API calls.
 """
+from contextlib import ExitStack
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, patch
 
-from agents.triage.triage_agent import _execute_tool, _run_llm_loop, run
+from agents.triage.triage_agent import _classify_block, _execute_decisions, run
 from agents.llm.base import LLMTurn, ToolCall, LLMProviderError
-from pipeline.run_logger import BlockResult
-import agents.triage.triage_agent as triage_agent_module
+from pipeline.run_logger import BlockResult, LlmStats
 
 
 # ── helpers ───────────────────────────────────────────────────────────────────
@@ -30,19 +31,21 @@ def make_llm_turn(
     )
 
 
-def make_tool_call_turn(tool_name: str, tool_args: dict) -> LLMTurn:
-    """
-    Convenience: a turn that requests one tool call.
-
-    raw_message defaults to None — adequate for tests that only check
-    which tool was called. For multi-turn tests that capture the messages
-    list on subsequent iterations, construct LLMTurn inline and pass
-    raw_message=MagicMock() so the loop appends a real object.
-    """
+def make_decisions_turn(decisions: list, prompt_tokens: int = 10, completion_tokens: int = 5) -> LLMTurn:
+    """A turn where the model calls submit_triage_decisions with the given decision list."""
     return LLMTurn(
         finish_reason="tool_calls",
         content=None,
-        tool_calls=[ToolCall(id="call_test", name=tool_name, args=tool_args)],
+        tool_calls=[ToolCall(id="tc_decisions", name="submit_triage_decisions", args={"decisions": decisions})],
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+    )
+
+
+def make_stats() -> LlmStats:
+    return LlmStats(
+        iterations=1, tools_called=["submit_triage_decisions"],
+        finish_reason="tool_calls", prompt_tokens=10, completion_tokens=5,
     )
 
 
@@ -69,65 +72,23 @@ def test_triage_agent_exposes_provider_not_raw_client():
     assert not hasattr(m, "_client"), "_client must be removed"
 
 
-# ── _execute_tool ─────────────────────────────────────────────────────────────
+# ── _classify_block — one structured call, no loop ───────────────────────────
 
 @pytest.mark.asyncio
-async def test_execute_tool_unknown_name_returns_error_string():
-    result = await _execute_tool("nonexistent_tool", {})
-    assert "Error" in result
-    assert "nonexistent_tool" in result
-
-
-@pytest.mark.asyncio
-async def test_execute_tool_dispatches_create_jira_ticket():
-    mock_fn = AsyncMock(return_value="Created SCRUM-1: Test bug")
-    with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"create_jira_ticket": mock_fn}):
-        result = await _execute_tool("create_jira_ticket", {
-            "summary": "Test bug", "issue_type": "Bug",
-            "priority": "High", "description": "desc",
-        })
-    assert result == "Created SCRUM-1: Test bug"
-    mock_fn.assert_called_once_with(
-        summary="Test bug", issue_type="Bug", priority="High", description="desc",
-        block_context=None,
-    )
-
-
-@pytest.mark.asyncio
-async def test_execute_tool_dispatches_post_slack_message():
-    mock_fn = AsyncMock(return_value="Message posted: hello")
-    with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"post_slack_message": mock_fn}):
-        result = await _execute_tool("post_slack_message", {"message": "hello"})
-    assert result == "Message posted: hello"
-    mock_fn.assert_called_once_with(message="hello")
-
-
-@pytest.mark.asyncio
-async def test_execute_tool_dispatches_ask_for_clarification():
-    mock_fn = AsyncMock(return_value="Clarification asked: Q?")
-    with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"ask_for_clarification": mock_fn}):
-        result = await _execute_tool("ask_for_clarification", {"question": "Q?"})
-    assert result == "Clarification asked: Q?"
-    mock_fn.assert_called_once_with(question="Q?")
-
-
-# ── _run_llm_loop — stop immediately ─────────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_run_llm_loop_stops_when_finish_reason_is_stop():
-    """When the LLM returns stop on the first call, no tools are invoked."""
+async def test_classify_block_makes_exactly_one_call():
+    """No loop: one block always means one _provider.chat call, regardless of outcome."""
     with patch("agents.triage.triage_agent._provider") as mock_provider:
         mock_provider.chat = AsyncMock(return_value=make_llm_turn(finish_reason="stop"))
-        await _run_llm_loop("Login is broken", block_index=0, block_snippet="Login is broken")
+        await _classify_block("Login is broken")
 
     mock_provider.chat.assert_called_once()
 
 
 @pytest.mark.asyncio
-async def test_run_llm_loop_passes_system_prompt_and_block_text():
+async def test_classify_block_passes_system_prompt_and_block_text():
     with patch("agents.triage.triage_agent._provider") as mock_provider:
         mock_provider.chat = AsyncMock(return_value=make_llm_turn(finish_reason="stop"))
-        await _run_llm_loop("crash on login page", block_index=0, block_snippet="crash on login")
+        await _classify_block("crash on login page")
 
     messages = mock_provider.chat.call_args.args[0]
     assert messages[0]["role"] == "system"
@@ -135,210 +96,268 @@ async def test_run_llm_loop_passes_system_prompt_and_block_text():
     assert "crash on login page" in messages[1]["content"]
 
 
-# ── _run_llm_loop — tool call then stop ──────────────────────────────────────
-
 @pytest.mark.asyncio
-async def test_run_llm_loop_executes_tool_then_stops():
-    """LLM calls post_slack_message once, then returns stop."""
-    mock_post = AsyncMock(return_value="Message posted: ticket created")
-    with patch("agents.triage.triage_agent._provider") as mock_provider:
-        mock_provider.chat = AsyncMock(side_effect=[
-            make_tool_call_turn("post_slack_message", {"message": "ticket created"}),
-            make_llm_turn(finish_reason="stop"),
-        ])
-        with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"post_slack_message": mock_post}):
-            await _run_llm_loop("test block", block_index=0, block_snippet="test block")
-
-    mock_post.assert_called_once_with(message="ticket created")
-    assert mock_provider.chat.call_count == 2
-
-
-@pytest.mark.asyncio
-async def test_run_llm_loop_appends_tool_result_to_messages():
-    """The tool result is fed back to the LLM as a tool role message."""
-    call_messages_seen = []
-
-    async def capture_chat(messages, tools, system=""):
-        call_messages_seen.append(list(messages))
-        if len(call_messages_seen) == 1:
-            return LLMTurn(
-                finish_reason="tool_calls",
-                content=None,
-                tool_calls=[ToolCall(id="tc_xyz", name="post_slack_message", args={"message": "hi"})],
-                raw_message=MagicMock(),
-            )
-        return make_llm_turn(finish_reason="stop")
-
-    mock_post = AsyncMock(return_value="Message posted: hi")
-    with patch("agents.triage.triage_agent._provider") as mock_provider:
-        mock_provider.chat = capture_chat
-        with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"post_slack_message": mock_post}):
-            await _run_llm_loop("some block", block_index=0, block_snippet="some block")
-
-    # Second call must include a tool-role message
-    second_call_messages = call_messages_seen[1]
-    tool_role_messages = [m for m in second_call_messages if isinstance(m, dict) and m.get("role") == "tool"]
-    assert len(tool_role_messages) == 1
-    assert tool_role_messages[0]["content"] == "Message posted: hi"
-    assert tool_role_messages[0]["tool_call_id"] == "tc_xyz"
-
-
-@pytest.mark.asyncio
-async def test_run_llm_loop_uses_all_four_tool_schemas():
+async def test_classify_block_passes_only_submit_decisions_schema():
+    """Exactly one tool is offered — there's nothing to loop between."""
     with patch("agents.triage.triage_agent._provider") as mock_provider:
         mock_provider.chat = AsyncMock(return_value=make_llm_turn(finish_reason="stop"))
-        await _run_llm_loop("test", block_index=0, block_snippet="test")
+        await _classify_block("test")
 
     tools_passed = mock_provider.chat.call_args.args[1]
-    tool_names = [t["function"]["name"] for t in tools_passed]
-    assert "create_jira_ticket" in tool_names
-    assert "post_slack_message" in tool_names
-    assert "ask_for_clarification" in tool_names
-    assert "search_memory" in tool_names
+    assert len(tools_passed) == 1
+    assert tools_passed[0]["function"]["name"] == "submit_triage_decisions"
 
-
-# ── _run_llm_loop — returns BlockResult (Chunk 2.1) ──────────────────────────
 
 @pytest.mark.asyncio
-async def test_run_llm_loop_returns_block_result():
-    """_run_llm_loop must return a BlockResult, not None."""
+async def test_classify_block_parses_decisions_from_tool_call():
+    decisions_in = [{"action": "create_ticket", "summary": "x"}]
+    with patch("agents.triage.triage_agent._provider") as mock_provider:
+        mock_provider.chat = AsyncMock(return_value=make_decisions_turn(decisions_in))
+        decisions, stats = await _classify_block("test")
+
+    assert decisions == decisions_in
+    assert stats.iterations == 1
+    assert stats.tools_called == ["submit_triage_decisions"]
+
+
+@pytest.mark.asyncio
+async def test_classify_block_returns_empty_list_when_no_decisions_given():
+    decisions_in: list = []
+    with patch("agents.triage.triage_agent._provider") as mock_provider:
+        mock_provider.chat = AsyncMock(return_value=make_decisions_turn(decisions_in))
+        decisions, stats = await _classify_block("just a comment")
+
+    assert decisions == []
+
+
+@pytest.mark.asyncio
+async def test_classify_block_returns_empty_list_when_no_tool_call():
+    """Graceful degrade (Rule 5) — a malformed turn with no tool call yields [], not a crash."""
+    with patch("agents.triage.triage_agent._provider") as mock_provider:
+        mock_provider.chat = AsyncMock(return_value=make_llm_turn(finish_reason="stop"))
+        decisions, stats = await _classify_block("test")
+
+    assert decisions == []
+    assert stats.tools_called == []
+    assert stats.finish_reason == "stop"
+
+
+@pytest.mark.asyncio
+async def test_classify_block_accumulates_token_stats():
     with patch("agents.triage.triage_agent._provider") as mock_provider:
         mock_provider.chat = AsyncMock(
-            return_value=make_llm_turn(finish_reason="stop", prompt_tokens=100, completion_tokens=50)
+            return_value=make_decisions_turn([], prompt_tokens=300, completion_tokens=60)
         )
-        result = await _run_llm_loop("login is broken", block_index=0, block_snippet="login is broken")
+        _, stats = await _classify_block("test")
 
-    assert isinstance(result, BlockResult)
-    assert result.block_index == 0
-    assert result.block_snippet == "login is broken"
+    assert stats.prompt_tokens == 300
+    assert stats.completion_tokens == 60
 
 
 @pytest.mark.asyncio
-async def test_run_llm_loop_accumulates_llm_stats():
-    """LlmStats captures iterations, finish_reason, and token totals."""
-    mock_post = AsyncMock(return_value="posted")
+async def test_classify_block_appends_episode_context_when_given():
+    captured_messages = []
+
+    async def capture_chat(messages, tools, system=""):
+        captured_messages.extend(messages)
+        return make_llm_turn(finish_reason="stop")
+
     with patch("agents.triage.triage_agent._provider") as mock_provider:
-        mock_provider.chat = AsyncMock(side_effect=[
-            make_tool_call_turn("post_slack_message", {"message": "hi"})._replace(
-                prompt_tokens=200, completion_tokens=40
-            ) if False else LLMTurn(
-                finish_reason="tool_calls", content=None,
-                tool_calls=[ToolCall(id="tc_1", name="post_slack_message", args={"message": "hi"})],
-                prompt_tokens=200, completion_tokens=40, raw_message=MagicMock(),
-            ),
-            make_llm_turn(finish_reason="stop", prompt_tokens=220, completion_tokens=30),
-        ])
-        with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"post_slack_message": mock_post}):
-            result = await _run_llm_loop("test", block_index=0, block_snippet="test")
+        mock_provider.chat = capture_chat
+        await _classify_block(
+            "Login crash",
+            episode_context="## Similar past decisions\n- [SCRUM-1] \"login bug\" → Bug, High (2026-04-30)",
+        )
 
-    assert result.llm is not None
-    assert result.llm.iterations == 2
-    assert result.llm.finish_reason == "stop"
-    assert result.llm.prompt_tokens == 420
-    assert result.llm.completion_tokens == 70
+    user_messages = [m for m in captured_messages if isinstance(m, dict) and m.get("role") == "user"]
+    assert len(user_messages) == 1
+    assert "## Similar past decisions" in user_messages[0]["content"]
+    assert "Login crash" in user_messages[0]["content"]
 
-
-# ── _run_llm_loop — action inference (Chunk 2.2) ─────────────────────────────
 
 @pytest.mark.asyncio
-async def test_run_llm_loop_action_ticket_created():
-    """When create_jira_ticket is called, action='ticket_created' with fields extracted."""
-    mock_jira = AsyncMock(return_value="Created SCRUM-11: Login crash → https://example.atlassian.net/browse/SCRUM-11")
-    with patch("agents.triage.triage_agent._provider") as mock_provider:
-        mock_provider.chat = AsyncMock(side_effect=[
-            LLMTurn(
-                finish_reason="tool_calls", content=None,
-                tool_calls=[ToolCall(id="tc_jira", name="create_jira_ticket", args={
-                    "summary": "Login crash", "issue_type": "Bug", "priority": "High",
-                    "description": "crashes on empty password",
-                })],
-                prompt_tokens=300, completion_tokens=60, raw_message=MagicMock(),
-            ),
-            make_llm_turn(finish_reason="stop", prompt_tokens=310, completion_tokens=20),
-        ])
-        with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"create_jira_ticket": mock_jira}):
-            result = await _run_llm_loop("login is broken", block_index=0, block_snippet="login is broken")
+async def test_classify_block_omits_episode_context_when_empty():
+    captured_messages = []
 
+    async def capture_chat(messages, tools, system=""):
+        captured_messages.extend(messages)
+        return make_llm_turn(finish_reason="stop")
+
+    with patch("agents.triage.triage_agent._provider") as mock_provider:
+        mock_provider.chat = capture_chat
+        await _classify_block("Login crash")
+
+    user_messages = [m for m in captured_messages if isinstance(m, dict) and m.get("role") == "user"]
+    assert len(user_messages) == 1
+    assert "## Similar past decisions" not in user_messages[0]["content"]
+    assert "Login crash" in user_messages[0]["content"]
+
+
+# ── _execute_decisions — deterministic dispatch, no model involved ──────────
+
+@pytest.mark.asyncio
+async def test_execute_decisions_empty_list_returns_single_no_action():
+    stats = make_stats()
+    results = await _execute_decisions([], block_index=0, block_snippet="s", run_id="r1", llm_stats=stats)
+
+    assert len(results) == 1
+    assert results[0].action == "no_action"
+    assert results[0].llm is stats
+
+
+@pytest.mark.asyncio
+async def test_execute_decisions_create_ticket_success_posts_confirmation():
+    decision = {
+        "action": "create_ticket", "summary": "Login crash", "issue_type": "Bug",
+        "priority": "High", "description": "crashes on empty password", "confidence": 0.9,
+    }
+    with patch("agents.triage.triage_agent.create_jira_ticket", new_callable=AsyncMock,
+               return_value="Created SCRUM-11: Login crash → https://example.atlassian.net/browse/SCRUM-11") as mock_jira:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock) as mock_post:
+            with patch("agents.triage.triage_agent.drain_confirmation_ts", return_value="1714406400.123"):
+                results = await _execute_decisions(
+                    [decision], block_index=0, block_snippet="s", run_id="r1", llm_stats=make_stats()
+                )
+
+    assert len(results) == 1
+    result = results[0]
     assert result.action == "ticket_created"
     assert result.ticket_key == "SCRUM-11"
     assert result.ticket_summary == "Login crash"
     assert result.ticket_type == "Bug"
     assert result.ticket_priority == "High"
+    assert result.confirmation_ts == "1714406400.123"
+    mock_post.assert_called_once()
+    assert "Created SCRUM-11" in mock_post.call_args[0][0]
+    assert mock_jira.call_args.kwargs["block_context"] == {"run_id": "r1", "block_index": 0, "block_snippet": "s"}
 
 
 @pytest.mark.asyncio
-async def test_run_llm_loop_action_escalated_for_confirmation():
-    """When create_jira_ticket returns [ESCALATED], action='escalated_for_confirmation', no ticket_key."""
-    mock_jira = AsyncMock(return_value="[ESCALATED] Low confidence (0.40) — posted for human confirmation.")
-    with patch("agents.triage.triage_agent._provider") as mock_provider:
-        mock_provider.chat = AsyncMock(side_effect=[
-            LLMTurn(
-                finish_reason="tool_calls", content=None,
-                tool_calls=[ToolCall(id="tc_jira", name="create_jira_ticket", args={
-                    "summary": "Vague issue", "issue_type": "Bug", "priority": "Medium",
-                    "description": "not much detail", "confidence": 0.4,
-                })],
-                prompt_tokens=300, completion_tokens=60, raw_message=MagicMock(),
-            ),
-            make_llm_turn(finish_reason="stop", prompt_tokens=310, completion_tokens=20),
-        ])
-        with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"create_jira_ticket": mock_jira}):
-            result = await _run_llm_loop("vague report", block_index=0, block_snippet="vague report")
+async def test_execute_decisions_confirmation_ts_none_when_drain_returns_none():
+    decision = {"action": "create_ticket", "summary": "x", "issue_type": "Bug",
+                "priority": "High", "description": "d", "confidence": 0.95}
+    with patch("agents.triage.triage_agent.create_jira_ticket", new_callable=AsyncMock,
+               return_value="Created SCRUM-1: x"):
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+            with patch("agents.triage.triage_agent.drain_confirmation_ts", return_value=None):
+                results = await _execute_decisions(
+                    [decision], block_index=0, block_snippet="s", run_id="r1", llm_stats=make_stats()
+                )
 
-    assert result.action == "escalated_for_confirmation"
-    assert result.ticket_key is None
-    assert result.ticket_summary == "Vague issue"
+    assert results[0].confirmation_ts is None
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_passes_block_context_to_create_jira_ticket_only():
-    """block_context is threaded through to create_jira_ticket but not other tools."""
-    mock_jira = AsyncMock(return_value="Created SCRUM-1: x")
-    mock_clarify = AsyncMock(return_value="Clarification posted")
-    ctx = {"run_id": "r1", "block_index": 0, "block_snippet": "s"}
-    with patch.dict(triage_agent_module.TOOL_EXECUTORS, {
-        "create_jira_ticket": mock_jira, "ask_for_clarification": mock_clarify,
-    }):
-        await _execute_tool("create_jira_ticket", {"summary": "s", "issue_type": "Bug",
-                                                     "priority": "High", "description": "d",
-                                                     "confidence": 0.95}, block_context=ctx)
-        await _execute_tool("ask_for_clarification", {"question": "q?"}, block_context=ctx)
+async def test_execute_decisions_escalated_does_not_post_extra_confirmation():
+    """escalate_for_confirmation() already posted the proposal — dispatch must not post again."""
+    decision = {"action": "create_ticket", "summary": "Vague issue", "issue_type": "Bug",
+                "priority": "Medium", "description": "not much detail", "confidence": 0.4}
+    with patch("agents.triage.triage_agent.create_jira_ticket", new_callable=AsyncMock,
+               return_value="[ESCALATED] Low confidence (0.40) — posted for human confirmation."):
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock) as mock_post:
+            results = await _execute_decisions(
+                [decision], block_index=0, block_snippet="s", run_id="r1", llm_stats=make_stats()
+            )
 
-    assert mock_jira.call_args.kwargs["block_context"] == ctx
-    assert "block_context" not in mock_clarify.call_args.kwargs
-
-
-@pytest.mark.asyncio
-async def test_run_llm_loop_action_clarification_asked():
-    """When ask_for_clarification is called, action='clarification_asked'."""
-    mock_clarify = AsyncMock(return_value="Clarification posted")
-    with patch("agents.triage.triage_agent._provider") as mock_provider:
-        mock_provider.chat = AsyncMock(side_effect=[
-            LLMTurn(
-                finish_reason="tool_calls", content=None,
-                tool_calls=[ToolCall(id="tc_clarify", name="ask_for_clarification", args={"message": "Can you clarify?"})],
-                prompt_tokens=150, completion_tokens=30, raw_message=MagicMock(),
-            ),
-            make_llm_turn(finish_reason="stop", prompt_tokens=160, completion_tokens=15),
-        ])
-        with patch.dict(triage_agent_module.TOOL_EXECUTORS, {"ask_for_clarification": mock_clarify}):
-            result = await _run_llm_loop("unclear message", block_index=1, block_snippet="unclear message")
-
-    assert result.action == "clarification_asked"
-    assert result.ticket_key is None
+    assert results[0].action == "escalated_for_confirmation"
+    assert results[0].ticket_key is None
+    assert results[0].ticket_summary == "Vague issue"
+    mock_post.assert_not_called()
 
 
 @pytest.mark.asyncio
-async def test_run_llm_loop_action_no_action_when_stop_only():
-    """When LLM returns stop with no tool calls, action='no_action'."""
-    with patch("agents.triage.triage_agent._provider") as mock_provider:
-        mock_provider.chat = AsyncMock(
-            return_value=make_llm_turn(finish_reason="stop", content="Got it",
-                                       prompt_tokens=100, completion_tokens=20)
+async def test_execute_decisions_jira_error_does_not_post_extra_confirmation():
+    """_create_ticket_in_jira() already notified Slack on failure — dispatch must not post again."""
+    decision = {"action": "create_ticket", "summary": "x", "issue_type": "Bug",
+                "priority": "High", "description": "d", "confidence": 0.95}
+    with patch("agents.triage.triage_agent.create_jira_ticket", new_callable=AsyncMock,
+               return_value="[JIRA_ERROR] Jira unavailable — team notified in Slack."):
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock) as mock_post:
+            results = await _execute_decisions(
+                [decision], block_index=0, block_snippet="s", run_id="r1", llm_stats=make_stats()
+            )
+
+    assert results[0].action == "error"
+    mock_post.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_execute_decisions_ask_clarification():
+    decision = {"action": "ask_clarification", "question": "Which page crashes?"}
+    with patch("agents.triage.triage_agent.ask_for_clarification", new_callable=AsyncMock) as mock_clarify:
+        results = await _execute_decisions(
+            [decision], block_index=1, block_snippet="s", run_id="r1", llm_stats=make_stats()
         )
-        result = await _run_llm_loop("just a comment", block_index=2, block_snippet="just a comment")
 
-    assert result.action == "no_action"
+    assert results[0].action == "clarification_asked"
+    assert results[0].ticket_key is None
+    mock_clarify.assert_called_once_with("Which page crashes?")
+
+
+@pytest.mark.asyncio
+async def test_execute_decisions_duplicate_posts_note():
+    """A conversational duplicate ('already filed as SCRUM-9') the embedding gate can't see."""
+    decision = {"action": "duplicate", "note": "Already filed as SCRUM-9", "ticket_key": "SCRUM-9"}
+    with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock) as mock_post:
+        results = await _execute_decisions(
+            [decision], block_index=0, block_snippet="s", run_id="r1", llm_stats=make_stats()
+        )
+
+    assert results[0].action == "duplicate_flagged"
+    assert results[0].ticket_key == "SCRUM-9"
+    assert "SCRUM-9" in mock_post.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_execute_decisions_unknown_action_returns_no_action():
+    results = await _execute_decisions(
+        [{"action": "something_unexpected"}], block_index=0, block_snippet="s",
+        run_id="r1", llm_stats=make_stats(),
+    )
+    assert results[0].action == "no_action"
+
+
+@pytest.mark.asyncio
+async def test_execute_decisions_multiple_decisions_produce_multiple_results():
+    """A block with two distinct issues yields two independent BlockResults, not one overwritten record."""
+    decisions = [
+        {"action": "create_ticket", "summary": "Login bug", "issue_type": "Bug",
+         "priority": "High", "description": "d1", "confidence": 0.9},
+        {"action": "create_ticket", "summary": "Dark mode request", "issue_type": "Story",
+         "priority": "Low", "description": "d2", "confidence": 0.85},
+    ]
+    with patch("agents.triage.triage_agent.create_jira_ticket", new_callable=AsyncMock, side_effect=[
+        "Created SCRUM-1: Login bug → https://example.atlassian.net/browse/SCRUM-1",
+        "Created SCRUM-2: Dark mode request → https://example.atlassian.net/browse/SCRUM-2",
+    ]):
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+            with patch("agents.triage.triage_agent.drain_confirmation_ts", return_value=None):
+                results = await _execute_decisions(
+                    decisions, block_index=0, block_snippet="s", run_id="r1", llm_stats=make_stats()
+                )
+
+    assert len(results) == 2
+    assert results[0].ticket_key == "SCRUM-1"
+    assert results[0].ticket_summary == "Login bug"
+    assert results[1].ticket_key == "SCRUM-2"
+    assert results[1].ticket_summary == "Dark mode request"
+
+
+@pytest.mark.asyncio
+async def test_execute_decisions_attaches_llm_stats_to_first_result_only():
+    """All decisions came from one LLM call — duplicating token counts would double-count them."""
+    decisions = [
+        {"action": "ask_clarification", "question": "q1?"},
+        {"action": "ask_clarification", "question": "q2?"},
+    ]
+    stats = make_stats()
+    with patch("agents.triage.triage_agent.ask_for_clarification", new_callable=AsyncMock):
+        results = await _execute_decisions(
+            decisions, block_index=0, block_snippet="s", run_id="r1", llm_stats=stats
+        )
+
+    assert results[0].llm is stats
+    assert results[1].llm is None
 
 
 # ── run() — helper fixtures ───────────────────────────────────────────────────
@@ -347,50 +366,83 @@ def make_one_block(text="bug report"):
     return [{"combined_text": text, "start_ts": "1.0", "end_ts": "1.0", "messages": []}]
 
 
-def patch_run_deps(blocks, llm_side_effect=None, llm_return=None):
+def patch_run_deps(
+    blocks,
+    decisions=None,
+    execute_side_effect=None,
+    execute_return=None,
+    duplicate_match=None,
+):
     """
-    Patch fetch_messages, build_context_blocks, _run_llm_loop, and all Phase 4
-    duplicate-detection functions with safe no-op defaults for run() tests.
+    Pre-loaded ExitStack of safe no-op defaults for run() tests: message/block
+    fetch, Phase 4 duplicate-detection functions, and the classify/execute
+    call sites. Returns (stack, mocks) — `with stack:` in the test, and use
+    mocks["classify_block"] / mocks["execute_decisions"] for assertions.
+
+    _classify_block's return value rarely matters on its own here since
+    _execute_decisions is independently mocked (it ignores whatever decisions
+    it's handed unless execute_side_effect reads them) — override `decisions`
+    only for tests that care what _classify_block itself produced.
     """
-    patches = [
-        patch("agents.triage.triage_agent.fetch_messages",
-              new_callable=AsyncMock,
-              return_value=[{"user": "U1", "text": "bug", "ts": "1.0"}]),
-        patch("agents.triage.triage_agent.build_context_blocks", return_value=blocks),
-    ]
-    if llm_side_effect is not None:
-        patches.append(patch("agents.triage.triage_agent._run_llm_loop",
-                             new_callable=AsyncMock, side_effect=llm_side_effect))
+    stack = ExitStack()
+    mocks = {}
+
+    mocks["fetch_messages"] = stack.enter_context(patch(
+        "agents.triage.triage_agent.fetch_messages", new_callable=AsyncMock,
+        return_value=[{"user": "U1", "text": "bug", "ts": "1.0"}],
+    ))
+    stack.enter_context(patch("agents.triage.triage_agent.build_context_blocks", return_value=blocks))
+
+    mocks["classify_block"] = stack.enter_context(patch(
+        "agents.triage.triage_agent._classify_block", new_callable=AsyncMock,
+        return_value=(decisions or [], make_stats()),
+    ))
+    if execute_side_effect is not None:
+        mocks["execute_decisions"] = stack.enter_context(patch(
+            "agents.triage.triage_agent._execute_decisions", new_callable=AsyncMock,
+            side_effect=execute_side_effect,
+        ))
     else:
-        patches.append(patch("agents.triage.triage_agent._run_llm_loop",
-                             new_callable=AsyncMock, return_value=llm_return))
-    # Phase 4 safe defaults — duplicate check does nothing
-    patches += [
-        patch("agents.triage.triage_agent.fetch_open_tickets",
-              new_callable=AsyncMock, return_value=[]),
-        patch("agents.triage.triage_agent.load_embedding_cache", return_value={}),
-        patch("agents.triage.triage_agent.build_embedding_cache",
-              new_callable=AsyncMock, return_value={}),
-        patch("agents.triage.triage_agent.embed_texts",
-              new_callable=AsyncMock, return_value=[[0.5, 0.5]]),
-        patch("agents.triage.triage_agent.find_duplicate", return_value=None),
-        patch("agents.triage.triage_agent.add_ticket_to_cache", return_value={}),
-    ]
-    return patches
+        mocks["execute_decisions"] = stack.enter_context(patch(
+            "agents.triage.triage_agent._execute_decisions", new_callable=AsyncMock,
+            return_value=execute_return if execute_return is not None else [],
+        ))
+
+    # Phase 4 safe defaults — duplicate check does nothing unless overridden
+    mocks["fetch_open_tickets"] = stack.enter_context(patch(
+        "agents.triage.triage_agent.fetch_open_tickets", new_callable=AsyncMock, return_value=[]
+    ))
+    stack.enter_context(patch("agents.triage.triage_agent.load_embedding_cache", return_value={}))
+    mocks["build_embedding_cache"] = stack.enter_context(patch(
+        "agents.triage.triage_agent.build_embedding_cache", new_callable=AsyncMock, return_value={}
+    ))
+    stack.enter_context(patch(
+        "agents.triage.triage_agent.embed_texts", new_callable=AsyncMock, return_value=[[0.5, 0.5]]
+    ))
+    stack.enter_context(patch("agents.triage.triage_agent.find_duplicate", return_value=duplicate_match))
+    mocks["add_ticket_to_cache"] = stack.enter_context(patch(
+        "agents.triage.triage_agent.add_ticket_to_cache", return_value={}
+    ))
+
+    return stack, mocks
 
 
-# ── run() — Rule 6: OpenAI error handler ─────────────────────────────────────
+def make_block_result(index=0, action="ticket_created", key="SCRUM-1"):
+    return BlockResult(
+        block_index=index, block_snippet="test snippet",
+        action=action, ticket_key=key,
+        ticket_summary="Test summary", ticket_type="Bug", ticket_priority="High",
+    )
+
+
+# ── run() — Rule 6: LLM provider error handler ───────────────────────────────
 
 @pytest.mark.asyncio
 async def test_run_openai_error_posts_slack_alert_and_exits():
-    """When LLM raises LLMProviderError, Slack alert is posted and process exits 1."""
-    patches = patch_run_deps(
-        blocks=make_one_block(),
-        llm_side_effect=LLMProviderError("API unavailable"),
-    )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message",
-                   new_callable=AsyncMock) as mock_post:
+    """When execution raises LLMProviderError, Slack alert is posted and process exits 1."""
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_side_effect=LLMProviderError("API unavailable"))
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock) as mock_post:
             with patch("agents.triage.triage_agent.write_run_log"):
                 with pytest.raises(SystemExit) as exc_info:
                     await run()
@@ -403,13 +455,9 @@ async def test_run_openai_error_posts_slack_alert_and_exits():
 @pytest.mark.asyncio
 async def test_run_openai_error_slack_also_down_writes_stdout(capsys):
     """When LLM and Slack both fail, error is written to stdout and exits 1."""
-    patches = patch_run_deps(
-        blocks=make_one_block(),
-        llm_side_effect=LLMProviderError("API unavailable"),
-    )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message",
-                   new_callable=AsyncMock,
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_side_effect=LLMProviderError("API unavailable"))
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock,
                    side_effect=Exception("Slack also down")):
             with patch("agents.triage.triage_agent.write_run_log"):
                 with pytest.raises(SystemExit) as exc_info:
@@ -424,41 +472,25 @@ async def test_run_openai_error_slack_also_down_writes_stdout(capsys):
 
 @pytest.mark.asyncio
 async def test_run_slack_error_continues_to_next_block():
-    """When Slack MCP raises on block 1, block 2 is still processed."""
+    """When execution raises on block 1, block 2 is still processed."""
     call_count = 0
 
-    async def llm_fail_first(block_text, block_index=0, block_snippet="", **kwargs):
+    async def execute_fail_first(decisions, block_index=0, block_snippet="", run_id="", llm_stats=None):
         nonlocal call_count
         call_count += 1
         if call_count == 1:
             raise Exception("Slack MCP broken pipe")
-        return make_block_result(index=block_index)
+        return [make_block_result(index=block_index)]
 
     two_blocks = [
         {"combined_text": "bug1", "start_ts": "1.0", "end_ts": "1.0", "messages": []},
         {"combined_text": "bug2", "start_ts": "2.0", "end_ts": "2.0", "messages": []},
     ]
-    with patch("agents.triage.triage_agent.fetch_messages",
-               new_callable=AsyncMock,
-               return_value=[{"user": "U1", "text": "x", "ts": "1.0"}]):
-        with patch("agents.triage.triage_agent.build_context_blocks", return_value=two_blocks):
-            with patch("agents.triage.triage_agent._run_llm_loop",
-                       new_callable=AsyncMock, side_effect=llm_fail_first):
-                with patch("agents.triage.triage_agent.fetch_open_tickets",
-                           new_callable=AsyncMock, return_value=[]):
-                    with patch("agents.triage.triage_agent.load_embedding_cache", return_value={}):
-                        with patch("agents.triage.triage_agent.build_embedding_cache",
-                                   new_callable=AsyncMock, return_value={}):
-                            with patch("agents.triage.triage_agent.embed_texts",
-                                       new_callable=AsyncMock, return_value=[[0.5, 0.5]]):
-                                with patch("agents.triage.triage_agent.find_duplicate",
-                                           return_value=None):
-                                    with patch("agents.triage.triage_agent.add_ticket_to_cache",
-                                               return_value={}):
-                                        with patch("agents.triage.triage_agent.post_slack_message",
-                                                   new_callable=AsyncMock):
-                                            with patch("agents.triage.triage_agent.write_run_log"):
-                                                await run()
+    stack, mocks = patch_run_deps(blocks=two_blocks, execute_side_effect=execute_fail_first)
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+            with patch("agents.triage.triage_agent.write_run_log"):
+                await run()
 
     assert call_count == 2
 
@@ -466,13 +498,9 @@ async def test_run_slack_error_continues_to_next_block():
 @pytest.mark.asyncio
 async def test_run_slack_error_does_not_swallow_openai_error():
     """LLMProviderError is NOT silently swallowed by the broad except Exception handler."""
-    patches = patch_run_deps(
-        blocks=make_one_block(),
-        llm_side_effect=LLMProviderError("API unavailable"),
-    )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message",
-                   new_callable=AsyncMock):
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_side_effect=LLMProviderError("API unavailable"))
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
             with patch("agents.triage.triage_agent.write_run_log"):
                 with pytest.raises(SystemExit):
                     await run()
@@ -484,13 +512,12 @@ async def test_run_slack_error_does_not_swallow_openai_error():
 @pytest.mark.asyncio
 async def test_run_consolidated_error_post_when_slack_errors():
     """When a block fails with a Slack error, consolidated post is sent at end of run."""
-    patches = patch_run_deps(
+    stack, mocks = patch_run_deps(
         blocks=make_one_block("login is broken"),
-        llm_side_effect=Exception("Slack MCP pipe broken"),
+        execute_side_effect=Exception("Slack MCP pipe broken"),
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message",
-                   new_callable=AsyncMock) as mock_post:
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock) as mock_post:
             with patch("agents.triage.triage_agent.write_run_log"):
                 await run()
 
@@ -504,13 +531,12 @@ async def test_run_consolidated_error_post_when_slack_errors():
 @pytest.mark.asyncio
 async def test_run_consolidated_post_fails_writes_stdout(capsys):
     """When consolidated post also fails, error is written to stdout and exits 1."""
-    patches = patch_run_deps(
+    stack, mocks = patch_run_deps(
         blocks=make_one_block("login is broken"),
-        llm_side_effect=Exception("Slack MCP pipe broken"),
+        execute_side_effect=Exception("Slack MCP pipe broken"),
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message",
-                   new_callable=AsyncMock,
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock,
                    side_effect=Exception("Slack completely down")):
             with patch("agents.triage.triage_agent.write_run_log"):
                 with pytest.raises(SystemExit) as exc_info:
@@ -522,21 +548,13 @@ async def test_run_consolidated_post_fails_writes_stdout(capsys):
     assert "login is broken" in captured.out
 
 
-# ── run() — builds RunLog (Chunk 3.1) ────────────────────────────────────────
-
-def make_block_result(index=0, action="ticket_created", key="SCRUM-1"):
-    return BlockResult(
-        block_index=index, block_snippet="test snippet",
-        action=action, ticket_key=key,
-        ticket_summary="Test summary", ticket_type="Bug", ticket_priority="High",
-    )
-
+# ── run() — builds RunLog ─────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_run_writes_log_file():
     """run() calls write_run_log after completing blocks."""
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
         with patch("agents.triage.triage_agent.write_run_log") as mock_write:
             with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
                 await run()
@@ -548,11 +566,12 @@ async def test_run_writes_log_file():
 
 @pytest.mark.asyncio
 async def test_run_log_has_block_results():
-    """run() appends each BlockResult to run_log.blocks."""
-    patches = patch_run_deps(
-        blocks=make_one_block(), llm_return=make_block_result(action="clarification_asked", key=None)
+    """run() extends run_log.blocks with every BlockResult _execute_decisions returns."""
+    stack, mocks = patch_run_deps(
+        blocks=make_one_block(),
+        execute_return=[make_block_result(action="clarification_asked", key=None)],
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+    with stack:
         with patch("agents.triage.triage_agent.write_run_log") as mock_write:
             with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
                 await run()
@@ -562,12 +581,30 @@ async def test_run_log_has_block_results():
 
 
 @pytest.mark.asyncio
+async def test_run_log_multiple_results_from_one_block_all_recorded():
+    """A block that yields two decisions produces two entries in run_log.blocks."""
+    two_results = [
+        make_block_result(index=0, action="ticket_created", key="SCRUM-1"),
+        make_block_result(index=0, action="ticket_created", key="SCRUM-2"),
+    ]
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=two_results)
+    with stack:
+        with patch("agents.triage.triage_agent.write_run_log") as mock_write:
+            with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+                await run()
+    run_log_arg = mock_write.call_args[0][0]
+    assert len(run_log_arg.blocks) == 2
+    assert run_log_arg.tickets_created_count == 2
+
+
+@pytest.mark.asyncio
 async def test_run_log_counts_clarifications():
-    """run() counts clarification_asked blocks in clarifications_asked_count."""
-    patches = patch_run_deps(
-        blocks=make_one_block(), llm_return=make_block_result(action="clarification_asked", key=None)
+    """run() counts clarification_asked results in clarifications_asked_count."""
+    stack, mocks = patch_run_deps(
+        blocks=make_one_block(),
+        execute_return=[make_block_result(action="clarification_asked", key=None)],
     )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+    with stack:
         with patch("agents.triage.triage_agent.write_run_log") as mock_write:
             with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
                 await run()
@@ -576,7 +613,22 @@ async def test_run_log_counts_clarifications():
     assert log.tickets_created_count == 0
 
 
-# ── _print_block_outcome (Chunk 3.2) ─────────────────────────────────────────
+@pytest.mark.asyncio
+async def test_run_log_counts_duplicate_flagged_from_execute_decisions():
+    """A duplicate action recognized during classification (not the embedding gate) still counts."""
+    stack, mocks = patch_run_deps(
+        blocks=make_one_block(),
+        execute_return=[BlockResult(block_index=0, block_snippet="s", action="duplicate_flagged", ticket_key="SCRUM-9")],
+    )
+    with stack:
+        with patch("agents.triage.triage_agent.write_run_log") as mock_write:
+            with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+                await run()
+    log = mock_write.call_args[0][0]
+    assert log.duplicates_flagged_count == 1
+
+
+# ── _print_block_outcome ──────────────────────────────────────────────────────
 
 def test_print_block_outcome_ticket_created(capsys):
     from agents.triage.triage_agent import _print_block_outcome
@@ -606,7 +658,16 @@ def test_print_block_outcome_error(capsys):
     assert "Error" in out
 
 
-# ── _compute_status + _print_run_summary (Chunk 3.3) ─────────────────────────
+def test_print_block_outcome_duplicate_without_ticket_key_does_not_crash(capsys):
+    """A duplicate found by classification (not the embedding gate) may have no ticket_key."""
+    from agents.triage.triage_agent import _print_block_outcome
+    result = BlockResult(block_index=0, block_snippet="x", action="duplicate_flagged", ticket_key=None)
+    _print_block_outcome(result, index=0, total=1)
+    out = capsys.readouterr().out
+    assert "[Block 1/1]" in out
+
+
+# ── _compute_status + _print_run_summary ─────────────────────────────────────
 
 def make_run_log(status="", error_count=0, tickets=1, clarifications=0):
     from pipeline.run_logger import RunLog
@@ -640,7 +701,7 @@ def test_print_run_summary_contains_key_fields(capsys):
     assert "Duplicates flagged" in out
 
 
-# ── _post_slack_summary (Chunk 3.4) ──────────────────────────────────────────
+# ── _post_slack_summary ───────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_post_slack_summary_success_run():
@@ -676,16 +737,13 @@ async def test_post_slack_summary_failure_logs_stdout(capsys):
     assert "summary" in out.lower() or "slack" in out.lower()
 
 
-# ── Fatal handler writes log (Chunk 3.5) ─────────────────────────────────────
+# ── Fatal handler writes log ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_run_openai_error_writes_fatal_log():
-    """When LLM raises LLMProviderError, a status='fatal' log is written before exiting."""
-    patches = patch_run_deps(
-        blocks=make_one_block(),
-        llm_side_effect=LLMProviderError("API unavailable"),
-    )
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+    """When execution raises LLMProviderError, a status='fatal' log is written before exiting."""
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_side_effect=LLMProviderError("API unavailable"))
+    with stack:
         with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
             with patch("agents.triage.triage_agent.write_run_log") as mock_write:
                 with pytest.raises(SystemExit):
@@ -695,74 +753,67 @@ async def test_run_openai_error_writes_fatal_log():
     assert run_log_arg.status == "fatal"
 
 
-# ── Phase 4: run() duplicate gate ────────────────────────────────────────────
+# ── run() — Phase 4: duplicate gate ──────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_run_fetches_open_tickets_in_parallel():
     """fetch_open_tickets is called once per run."""
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2], patches[3] as mock_fetch_tickets, \
-         patches[4], patches[5], patches[6], patches[7], patches[8]:
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
         with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
             with patch("agents.triage.triage_agent.write_run_log"):
                 await run()
-    mock_fetch_tickets.assert_called_once()
+    mocks["fetch_open_tickets"].assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_run_builds_embedding_cache_after_fetch():
     """build_embedding_cache is called once with the fetched tickets."""
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2], patches[3], \
-         patches[4], patches[5] as mock_build, patches[6], patches[7], patches[8]:
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
         with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
             with patch("agents.triage.triage_agent.write_run_log"):
                 await run()
-    mock_build.assert_called_once()
+    mocks["build_embedding_cache"].assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_run_flags_duplicate_when_similarity_above_threshold():
-    """When find_duplicate returns a match, LLM loop is skipped."""
+    """When find_duplicate returns a match, classify + execute are skipped entirely."""
     match = {"key": "SCRUM-5", "summary": "Login crash", "similarity": 0.92}
-    patches = patch_run_deps(blocks=make_one_block("login is broken"),
-                              llm_return=make_block_result())
-    with patches[0], patches[1], patches[2] as mock_llm, patches[3], \
-         patches[4], patches[5], patches[6], \
-         patch("agents.triage.triage_agent.find_duplicate", return_value=match), \
-         patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message",
-                   new_callable=AsyncMock) as mock_post:
+    stack, mocks = patch_run_deps(
+        blocks=make_one_block("login is broken"), execute_return=[make_block_result()], duplicate_match=match,
+    )
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock) as mock_post:
             with patch("agents.triage.triage_agent.write_run_log"):
                 await run()
 
-    mock_llm.assert_not_called()
+    mocks["classify_block"].assert_not_called()
+    mocks["execute_decisions"].assert_not_called()
     assert mock_post.called
     first_call_text = mock_post.call_args_list[0][0][0]
     assert "SCRUM-5" in first_call_text
 
 
 @pytest.mark.asyncio
-async def test_run_proceeds_to_llm_when_no_duplicate():
-    """When find_duplicate returns None, LLM loop runs normally."""
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2] as mock_llm, patches[3], \
-         patches[4], patches[5], patches[6], patches[7], patches[8]:
+async def test_run_proceeds_to_classify_when_no_duplicate():
+    """When find_duplicate returns None, classify + execute run normally."""
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
         with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
             with patch("agents.triage.triage_agent.write_run_log"):
                 await run()
-    mock_llm.assert_called_once()
+    mocks["classify_block"].assert_called_once()
+    mocks["execute_decisions"].assert_called_once()
 
 
 @pytest.mark.asyncio
 async def test_run_increments_duplicates_flagged_count():
-    """When a duplicate is found, run_log.duplicates_flagged_count is incremented."""
+    """When a duplicate is found by the embedding gate, run_log.duplicates_flagged_count is incremented."""
     match = {"key": "SCRUM-5", "summary": "Login crash", "similarity": 0.92}
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2], patches[3], \
-         patches[4], patches[5], patches[6], \
-         patch("agents.triage.triage_agent.find_duplicate", return_value=match), \
-         patches[8]:
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()], duplicate_match=match)
+    with stack:
         with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
             with patch("agents.triage.triage_agent.write_run_log") as mock_write:
                 await run()
@@ -774,26 +825,24 @@ async def test_run_increments_duplicates_flagged_count():
 async def test_run_adds_new_ticket_to_cache_after_creation():
     """After a ticket is created, add_ticket_to_cache is called with the ticket key."""
     result_with_ticket = make_block_result(action="ticket_created", key="SCRUM-12")
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=result_with_ticket)
-    with patches[0], patches[1], patches[2], patches[3], \
-         patches[4], patches[5], patches[6], patches[7], \
-         patch("agents.triage.triage_agent.add_ticket_to_cache") as mock_add:
-        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
-            with patch("agents.triage.triage_agent.write_run_log"):
-                await run()
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[result_with_ticket])
+    with stack:
+        with patch("agents.triage.triage_agent.add_ticket_to_cache") as mock_add:
+            with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+                with patch("agents.triage.triage_agent.write_run_log"):
+                    await run()
     mock_add.assert_called_once()
     assert mock_add.call_args[0][1] == "SCRUM-12"
 
 
-# ── Chunk 6.1 — run() returns RunLog + drains confirmation_ts ────────────────
+# ── run() — returns RunLog ────────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_run_returns_run_log():
     """run() must return a RunLog, not None."""
     from pipeline.run_logger import RunLog
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2], patches[3], patches[4], \
-         patches[5], patches[6], patches[7], patches[8]:
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
         with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
             with patch("agents.triage.triage_agent.write_run_log"):
                 result = await run()
@@ -801,66 +850,7 @@ async def test_run_returns_run_log():
     assert isinstance(result, RunLog)
 
 
-@pytest.mark.asyncio
-async def test_run_sets_confirmation_ts_for_ticket_created():
-    """When drain_confirmation_ts returns a ts, result.confirmation_ts is set."""
-    ticket_result = make_block_result(action="ticket_created", key="SCRUM-1")
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=ticket_result)
-    # drain called twice: once before block (returns None), once after (returns ts)
-    with patches[0], patches[1], patches[2], patches[3], patches[4], \
-         patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
-            with patch("agents.triage.triage_agent.write_run_log") as mock_write:
-                with patch("agents.triage.triage_agent.drain_confirmation_ts",
-                           side_effect=[None, "1714406400.123"]):
-                    await run()
-    log = mock_write.call_args[0][0]
-    ticket_blocks = [b for b in log.blocks if b.action == "ticket_created"]
-    assert len(ticket_blocks) == 1
-    assert ticket_blocks[0].confirmation_ts == "1714406400.123"
-
-
-@pytest.mark.asyncio
-async def test_run_confirmation_ts_none_when_drain_returns_none():
-    """When drain_confirmation_ts returns None, confirmation_ts stays None."""
-    ticket_result = make_block_result(action="ticket_created", key="SCRUM-1")
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=ticket_result)
-    with patches[0], patches[1], patches[2], patches[3], patches[4], \
-         patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
-            with patch("agents.triage.triage_agent.write_run_log") as mock_write:
-                with patch("agents.triage.triage_agent.drain_confirmation_ts", return_value=None):
-                    await run()
-    log = mock_write.call_args[0][0]
-    ticket_blocks = [b for b in log.blocks if b.action == "ticket_created"]
-    assert ticket_blocks[0].confirmation_ts is None
-
-
-# ── Block 4: Memory integration tests ────────────────────────────────────────
-
-# ── Chunk 4.1 — _run_llm_loop no longer accepts episode_context ──────────────
-
-@pytest.mark.asyncio
-async def test_run_llm_loop_does_not_pre_inject_episodes():
-    """_run_llm_loop sends only the block text in the user message (no episode pre-injection)."""
-    captured_messages = []
-
-    async def capture_chat(messages, tools, system=""):
-        captured_messages.extend(messages)
-        return make_llm_turn(finish_reason="stop")
-
-    with patch("agents.triage.triage_agent._provider") as mock_provider:
-        mock_provider.chat = capture_chat
-        await _run_llm_loop("Login crash", block_index=0, block_snippet="Login crash")
-
-    user_messages = [m for m in captured_messages if isinstance(m, dict) and m.get("role") == "user"]
-    assert len(user_messages) == 1
-    # No "## Similar past decisions" pre-injected — that comes via search_memory tool call now
-    assert "## Similar past decisions" not in user_messages[0]["content"]
-    assert "Login crash" in user_messages[0]["content"]
-
-
-# ── Chunk 4.2 — run() gains memory_context + effective_prompt ────────────────
+# ── Memory integration tests ──────────────────────────────────────────────────
 
 @pytest.mark.asyncio
 async def test_run_with_memory_context_injects_semantic_into_system_prompt():
@@ -901,123 +891,75 @@ async def test_run_with_memory_context_injects_semantic_into_system_prompt():
 
 @pytest.mark.asyncio
 async def test_run_with_no_memory_context_uses_original_prompt():
-    """run() with memory_context=None behaves like the pre-Phase-7 default."""
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2], patches[3], patches[4], \
-         patches[5], patches[6], patches[7], patches[8]:
+    """run() with memory_context=None behaves like the pre-memory default."""
+    from pipeline.run_logger import RunLog
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
         with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
             with patch("agents.triage.triage_agent.write_run_log"):
                 result = await run(memory_context=None)
-    from pipeline.run_logger import RunLog
     assert isinstance(result, RunLog)
 
 
-# ── Chunk 4.3 — run() sets episode store when memory_context is given ────────
+# ── run() retrieves episodes deterministically via block_emb ────────────────
+# patch_run_deps mocks embed_texts to return [[0.5, 0.5]] — that's block_emb.
 
 @pytest.mark.asyncio
-async def test_run_sets_episode_store_when_memory_context_given():
-    """When memory_context is provided, set_episode_store is called before the block loop."""
+async def test_run_injects_episode_context_when_similarity_clears_threshold():
+    """A stored episode with an embedding matching block_emb is passed into _classify_block."""
     from pipeline.memory_runner import MemoryContext
-    from pipeline.episode_store import EpisodeStore
-
-    store = EpisodeStore()
-    ctx = MemoryContext(semantic_injection="", episode_store=store)
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2], patches[3], patches[4], \
-         patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
-            with patch("agents.triage.triage_agent.write_run_log"):
-                with patch("agents.triage.tools.memory_tools.set_episode_store") as mock_set:
-                    await run(memory_context=ctx)
-    mock_set.assert_called_once_with(store)
-
-
-@pytest.mark.asyncio
-async def test_run_does_not_set_episode_store_when_no_memory_context():
-    """When memory_context is None, set_episode_store is never called."""
-    patches = patch_run_deps(blocks=make_one_block(), llm_return=make_block_result())
-    with patches[0], patches[1], patches[2], patches[3], patches[4], \
-         patches[5], patches[6], patches[7], patches[8]:
-        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
-            with patch("agents.triage.triage_agent.write_run_log"):
-                with patch("agents.triage.tools.memory_tools.set_episode_store") as mock_set:
-                    await run(memory_context=None)
-    mock_set.assert_not_called()
-
-
-# ── Chunk 4.4 — search_memory executor ───────────────────────────────────────
-
-@pytest.mark.asyncio
-async def test_search_memory_returns_no_memory_when_store_not_set():
-    """When _active_episode_store is None (no memory_context), returns the no-memory message."""
-    import agents.triage.tools.memory_tools as mt
-    original = mt._active_episode_store
-    mt._active_episode_store = None
-    try:
-        from agents.triage.tools.memory_tools import search_memory
-        result = await search_memory("login crash")
-    finally:
-        mt._active_episode_store = original
-    assert "No memory available" in result
-
-
-@pytest.mark.asyncio
-async def test_search_memory_returns_formatted_episodes_when_found():
-    """When store has episodes and embed succeeds, returns formatted past decisions."""
-    import agents.triage.tools.memory_tools as mt
     from pipeline.episode_store import Episode, EpisodeStore
 
     ep = Episode(
         run_id="r1", block_index=0, block_snippet="login bug",
         ticket_key="SCRUM-1", ticket_type="Bug", ticket_priority="High",
-        ticket_summary="Fix login crash", embedding=[1.0, 0.0],
+        ticket_summary="Fix login crash", embedding=[0.5, 0.5],  # identical direction to block_emb
         run_ts="2026-04-30T12:00:00",
     )
-    store = EpisodeStore(episodes=[ep])
-    mt._active_episode_store = store
-    try:
-        from agents.triage.tools.memory_tools import search_memory
-        with patch("agents.triage.tools.memory_tools.embed_texts",
-                   new_callable=AsyncMock, return_value=[[1.0, 0.0]]):
-            result = await search_memory("login crash")
-    finally:
-        mt._active_episode_store = None
-    assert "SCRUM-1" in result
-    assert "Bug" in result
+    ctx = MemoryContext(semantic_injection="", episode_store=EpisodeStore(episodes=[ep]))
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+            with patch("agents.triage.triage_agent.write_run_log"):
+                await run(memory_context=ctx)
+
+    episode_context = mocks["classify_block"].call_args.kwargs["episode_context"]
+    assert "SCRUM-1" in episode_context
+    assert "## Similar past decisions" in episode_context
 
 
 @pytest.mark.asyncio
-async def test_search_memory_returns_not_found_when_store_empty():
-    """When store has no episodes, returns the no-match message (Rule 11)."""
-    import agents.triage.tools.memory_tools as mt
-    from pipeline.episode_store import EpisodeStore
+async def test_run_omits_episode_context_when_similarity_below_threshold():
+    """A stored episode whose embedding doesn't resemble block_emb is not injected."""
+    from pipeline.memory_runner import MemoryContext
+    from pipeline.episode_store import Episode, EpisodeStore
 
-    mt._active_episode_store = EpisodeStore(episodes=[])
-    try:
-        from agents.triage.tools.memory_tools import search_memory
-        with patch("agents.triage.tools.memory_tools.embed_texts",
-                   new_callable=AsyncMock, return_value=[[0.5, 0.5]]):
-            result = await search_memory("some issue")
-    finally:
-        mt._active_episode_store = None
-    assert "No similar past decisions found" in result
+    ep = Episode(
+        run_id="r1", block_index=0, block_snippet="dark mode request",
+        ticket_key="SCRUM-9", ticket_type="Story", ticket_priority="Low",
+        ticket_summary="Add dark mode toggle", embedding=[1.0, -1.0],  # orthogonal to block_emb
+        run_ts="2026-04-30T12:00:00",
+    )
+    ctx = MemoryContext(semantic_injection="", episode_store=EpisodeStore(episodes=[ep]))
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+            with patch("agents.triage.triage_agent.write_run_log"):
+                await run(memory_context=ctx)
+
+    assert mocks["classify_block"].call_args.kwargs["episode_context"] == ""
 
 
 @pytest.mark.asyncio
-async def test_search_memory_returns_error_string_when_embed_fails():
-    """When embed_texts raises, search_memory returns a graceful error string."""
-    import agents.triage.tools.memory_tools as mt
-    from pipeline.episode_store import EpisodeStore
+async def test_run_omits_episode_context_when_no_memory_context():
+    """When memory_context is None, episode_context passed to _classify_block is empty."""
+    stack, mocks = patch_run_deps(blocks=make_one_block(), execute_return=[make_block_result()])
+    with stack:
+        with patch("agents.triage.triage_agent.post_slack_message", new_callable=AsyncMock):
+            with patch("agents.triage.triage_agent.write_run_log"):
+                await run(memory_context=None)
 
-    mt._active_episode_store = EpisodeStore(episodes=[])
-    try:
-        from agents.triage.tools.memory_tools import search_memory
-        with patch("agents.triage.tools.memory_tools.embed_texts",
-                   new_callable=AsyncMock, side_effect=Exception("embed API down")):
-            result = await search_memory("some issue")
-    finally:
-        mt._active_episode_store = None
-    assert "Memory search unavailable" in result
+    assert mocks["classify_block"].call_args.kwargs["episode_context"] == ""
 
 
 # ── run() — Phase 10: resolve pending confirmations ──────────────────────────
@@ -1026,9 +968,9 @@ async def test_search_memory_returns_error_string_when_embed_fails():
 async def test_run_resolves_pending_confirmations_when_items_exist():
     from pipeline.pending_confirmation_store import PendingConfirmationStore
 
-    patches = patch_run_deps(blocks=[], llm_return=None)
+    stack, mocks = patch_run_deps(blocks=[])
     non_empty_store = PendingConfirmationStore(items=[MagicMock()])
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+    with stack:
         with patch("agents.triage.triage_agent.load_pending_store", return_value=non_empty_store):
             with patch("agents.triage.triage_agent.resolve_pending_confirmations",
                        new_callable=AsyncMock, return_value=non_empty_store) as mock_resolve:
@@ -1044,9 +986,9 @@ async def test_run_resolves_pending_confirmations_when_items_exist():
 async def test_run_skips_resolution_when_no_pending_items():
     from pipeline.pending_confirmation_store import PendingConfirmationStore
 
-    patches = patch_run_deps(blocks=[], llm_return=None)
+    stack, mocks = patch_run_deps(blocks=[])
     empty_store = PendingConfirmationStore(items=[])
-    with patches[0], patches[1], patches[2], patches[3], patches[4], patches[5], patches[6], patches[7], patches[8]:
+    with stack:
         with patch("agents.triage.triage_agent.load_pending_store", return_value=empty_store):
             with patch("agents.triage.triage_agent.resolve_pending_confirmations",
                        new_callable=AsyncMock) as mock_resolve:

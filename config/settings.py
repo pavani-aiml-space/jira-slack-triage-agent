@@ -31,7 +31,6 @@ class Settings:
     # ── Agent behaviour ────────────────────────────────────────────────────────
     CONFIDENCE_AUTO_ACT: float = float(os.getenv("CONFIDENCE_AUTO_ACT", "0.90"))
     CONFIDENCE_ASK_HUMAN: float = float(os.getenv("CONFIDENCE_ASK_HUMAN", "0.65"))
-    MAX_AGENT_ITERATIONS: int = int(os.getenv("MAX_AGENT_ITERATIONS", "10"))
 
     # ── Triage Context ─────────────────────────────────────────────────────────
     CONTEXT_WINDOW_MINUTES: int = int(os.getenv("CONTEXT_WINDOW_MINUTES", "5"))
@@ -77,6 +76,7 @@ class Settings:
     SEMANTIC_STORE_PATH:           str = os.getenv("SEMANTIC_STORE_PATH", "memory/semantic_store.json")
     MAX_EPISODES:                  int = int(os.getenv("MAX_EPISODES",                   "200"))
     MAX_INJECTED_EPISODES:         int = int(os.getenv("MAX_INJECTED_EPISODES",          "3"))
+    EPISODE_SIMILARITY_THRESHOLD:  float = float(os.getenv("EPISODE_SIMILARITY_THRESHOLD", "0.75"))
     SEMANTIC_EXTRACTION_THRESHOLD: int = int(os.getenv("SEMANTIC_EXTRACTION_THRESHOLD",  "5"))
     SEMANTIC_LLM_MIN_PATTERNS:     int = int(os.getenv("SEMANTIC_LLM_MIN_PATTERNS",      "3"))
     MAX_SEMANTIC_PATTERN_CHARS:    int = int(os.getenv("MAX_SEMANTIC_PATTERN_CHARS",     "1000"))

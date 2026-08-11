@@ -11,7 +11,6 @@ Lifecycle:
 """
 from __future__ import annotations
 
-import asyncio
 import json
 import os
 from collections import defaultdict
@@ -19,14 +18,13 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
-from openai import OpenAI
-
+from agents.llm.factory import get_llm_provider
 from config.settings import settings
 
 if TYPE_CHECKING:
     from pipeline.episode_store import Episode
 
-_client = OpenAI(api_key=settings.OPENAI_API_KEY)
+_provider = get_llm_provider(settings)
 
 
 # ── Dataclasses ───────────────────────────────────────────────────────────────
@@ -113,7 +111,9 @@ def extract_count_patterns(episodes: list[Episode], min_count: int) -> list[Patt
 
 async def summarise_with_llm(patterns: list[Pattern]) -> list[Pattern]:
     """
-    Enrich each Pattern's summary_text using GPT-4o.
+    Enrich each Pattern's summary_text using the configured LLM provider
+    (Claude by default, via agents/llm/factory.get_llm_provider(), same
+    provider abstraction the main triage call uses).
     On any failure, returns the pattern unchanged (Rule 10).
     """
     result = list(patterns)
@@ -124,16 +124,12 @@ async def summarise_with_llm(patterns: list[Pattern]) -> list[Pattern]:
             f"(type: {p.type_priority_key}, {p.count} decisions):\n{examples}"
         )
         try:
-            response = await asyncio.to_thread(
-                _client.chat.completions.create,
-                model=settings.LLM_MODEL,
-                messages=[{"role": "user", "content": prompt}],
-            )
+            turn = await _provider.chat([{"role": "user", "content": prompt}], [])
             result[i] = Pattern(
                 type_priority_key=p.type_priority_key,
                 count=p.count,
                 example_summaries=p.example_summaries,
-                summary_text=response.choices[0].message.content.strip(),
+                summary_text=(turn.content or "").strip(),
                 created_at=p.created_at,
                 source="llm_summarised",
             )

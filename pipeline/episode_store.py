@@ -83,10 +83,13 @@ def retrieve_similar(
     store: EpisodeStore,
     query_emb: list[float],
     top_k: int,
+    threshold: float = 0.0,
 ) -> list[Episode]:
     """
-    Return up to top_k episodes sorted by cosine similarity to query_emb.
-    Returns [] if the store is empty (Rule 11 — no injection, not an error).
+    Return up to top_k episodes at or above threshold, sorted by cosine
+    similarity to query_emb (highest first).
+    Returns [] if the store is empty or nothing clears threshold (Rule 11 —
+    no injection, not an error).
     """
     if not store.episodes:
         return []
@@ -94,6 +97,7 @@ def retrieve_similar(
         (cosine_similarity(query_emb, ep.embedding), ep)
         for ep in store.episodes
     ]
+    scored = [pair for pair in scored if pair[0] >= threshold]
     scored.sort(key=lambda x: x[0], reverse=True)
     return [ep for _, ep in scored[:top_k]]
 
